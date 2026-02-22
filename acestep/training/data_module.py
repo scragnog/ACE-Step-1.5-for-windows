@@ -8,6 +8,7 @@ Supports both raw audio loading and preprocessed tensor loading.
 import os
 import json
 import random
+from collections import OrderedDict
 from typing import Optional, List, Dict, Any, Tuple
 from loguru import logger
 
@@ -32,24 +33,169 @@ except ImportError:
 # Preprocessed Tensor Dataset (Recommended for Training)
 # ============================================================================
 
+
+def _load_tensor_file(tensor_path: str) -> Dict[str, Any]:
+    """Load a tensor ``.pt`` file robustly across torch versions.
+
+    Args:
+        tensor_path: Absolute path to a tensor ``.pt`` file.
+
+    Returns:
+        Deserialized sample dictionary.
+    """
+    try:
+        return torch.load(tensor_path, map_location='cpu', weights_only=True)
+    except TypeError:
+        return torch.load(tensor_path, map_location='cpu')
+    except Exception:
+        return torch.load(tensor_path, map_location='cpu', weights_only=False)
+
+
+def build_tensor_shards(
+    tensor_dir: str,
+    shard_size: int = 256,
+) -> Dict[str, Any]:
+    """Build shard files from per-sample ``.pt`` tensors and rewrite manifest.
+
+    The function is backward-compatible and no-op when the manifest is already
+    in sharded form.
+
+    Args:
+        tensor_dir: Directory containing preprocessed tensor ``.pt`` files.
+        shard_size: Number of samples per shard. ``<=0`` disables sharding.
+
+    Returns:
+        Summary dictionary with sharding status and counts.
+    """
+    validated_dir = safe_path(tensor_dir)
+    if not os.path.isdir(validated_dir):
+        raise ValueError(f"Not an existing directory: {tensor_dir}")
+
+    shard_size = int(shard_size)
+    if shard_size <= 0:
+        return {
+            "created": False,
+            "already_sharded": False,
+            "num_samples": 0,
+            "num_shards": 0,
+            "reason": "disabled",
+        }
+
+    manifest_path = safe_path("manifest.json", base=validated_dir)
+    manifest: Dict[str, Any] = {}
+    sample_entries: List[Any] = []
+
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        sample_entries = manifest.get("samples", [])
+
+    if sample_entries and isinstance(sample_entries[0], dict) and "shard" in sample_entries[0]:
+        return {
+            "created": False,
+            "already_sharded": True,
+            "num_samples": len(sample_entries),
+            "num_shards": len({s.get("shard") for s in sample_entries if isinstance(s, dict)}),
+            "reason": "already_sharded",
+        }
+
+    sample_paths: List[str] = []
+    if sample_entries:
+        for raw in sample_entries:
+            if not isinstance(raw, str):
+                continue
+            try:
+                resolved = safe_path(raw, base=validated_dir)
+            except ValueError:
+                continue
+            if os.path.isfile(resolved):
+                sample_paths.append(resolved)
+    else:
+        for filename in os.listdir(validated_dir):
+            if filename.endswith('.pt') and filename != "manifest.json":
+                resolved = safe_path(filename, base=validated_dir)
+                if os.path.isfile(resolved):
+                    sample_paths.append(resolved)
+
+    if not sample_paths:
+        return {
+            "created": False,
+            "already_sharded": False,
+            "num_samples": 0,
+            "num_shards": 0,
+            "reason": "no_samples",
+        }
+
+    os.makedirs(safe_path("shards", base=validated_dir), exist_ok=True)
+    sharded_entries: List[Dict[str, Any]] = []
+    shard_idx = 0
+
+    for start in range(0, len(sample_paths), shard_size):
+        chunk_paths = sample_paths[start:start + shard_size]
+        shard_samples: List[Dict[str, Any]] = []
+        for sample_path in chunk_paths:
+            data = _load_tensor_file(sample_path)
+            shard_samples.append(
+                {
+                    "target_latents": data["target_latents"],
+                    "attention_mask": data["attention_mask"],
+                    "encoder_hidden_states": data["encoder_hidden_states"],
+                    "encoder_attention_mask": data["encoder_attention_mask"],
+                    "context_latents": data["context_latents"],
+                    "metadata": data.get("metadata", {}),
+                }
+            )
+
+        shard_rel = f"shards/shard_{shard_idx:05d}.pt"
+        shard_abs = safe_path(shard_rel, base=validated_dir)
+        torch.save({"samples": shard_samples}, shard_abs)
+
+        for local_idx in range(len(shard_samples)):
+            sharded_entries.append({"shard": shard_rel, "index": local_idx})
+
+        shard_idx += 1
+
+    manifest["samples"] = sharded_entries
+    manifest["num_samples"] = len(sharded_entries)
+    manifest["format"] = "sharded_v1"
+
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    logger.info(
+        "Built tensor shards: %d samples -> %d shards (size=%d)",
+        len(sharded_entries),
+        shard_idx,
+        shard_size,
+    )
+    return {
+        "created": True,
+        "already_sharded": False,
+        "num_samples": len(sharded_entries),
+        "num_shards": shard_idx,
+        "shard_size": shard_size,
+        "manifest_path": manifest_path,
+    }
+
 class PreprocessedTensorDataset(Dataset):
     """Dataset that loads preprocessed tensor files.
-    
+
     This is the recommended dataset for training as all tensors are pre-computed:
     - target_latents: VAE-encoded audio [T, 64]
     - encoder_hidden_states: Condition encoder output [L, D]
     - encoder_attention_mask: Condition mask [L]
     - context_latents: Source context [T, 65]
     - attention_mask: Audio latent mask [T]
-    
+
     No VAE/text encoder needed during training - just load tensors directly!
     """
-    
-    def __init__(self, tensor_dir: str):
+
+    def __init__(self, tensor_dir: str, cache_size: int = 0):
         """Initialize from a directory of preprocessed .pt files.
-        
+
         Args:
             tensor_dir: Directory containing preprocessed .pt files and manifest.json
+            cache_size: Maximum number of decoded samples to cache per worker process
             
         Raises:
             ValueError: If tensor_dir is not an existing directory or escapes safe root.
@@ -59,28 +205,34 @@ class PreprocessedTensorDataset(Dataset):
             raise ValueError(f"Not an existing directory: {tensor_dir}")
         self.tensor_dir = validated_dir
         self.sample_paths: List[str] = []
+        self.sample_refs: List[Dict[str, Any]] = []
+        self.cache_size = max(0, int(cache_size))
+        self._sample_cache: "OrderedDict[int, Dict[str, Any]]" = OrderedDict()
+        self._shard_cache: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+        self._shard_cache_size = 2
         
         # Load manifest if exists
         manifest_path = safe_path("manifest.json", base=self.tensor_dir)
         if os.path.exists(manifest_path):
             with open(manifest_path, 'r') as f:
                 manifest = json.load(f)
-            raw_paths = manifest.get("samples", [])
-            for raw in raw_paths:
-                resolved = self._resolve_manifest_path(raw)
+            raw_entries = manifest.get("samples", [])
+            for raw in raw_entries:
+                resolved = self._resolve_manifest_entry(raw)
                 if resolved is not None:
-                    self.sample_paths.append(resolved)
+                    self.sample_refs.append(resolved)
+                    self.sample_paths.append(resolved["path"])
         else:
             # Fallback: scan directory for .pt files (already inside tensor_dir)
             for f in os.listdir(self.tensor_dir):
                 if f.endswith('.pt') and f != "manifest.json":
-                    self.sample_paths.append(
-                        safe_path(f, base=self.tensor_dir)
-                    )
+                    resolved = safe_path(f, base=self.tensor_dir)
+                    self.sample_paths.append(resolved)
+                    self.sample_refs.append({"type": "file", "path": resolved})
         
         # Validate paths exist on disk
         self.valid_paths = [p for p in self.sample_paths if os.path.exists(p)]
-        
+
         if len(self.valid_paths) != len(self.sample_paths):
             logger.warning(
                 f"Some tensor files not found: "
@@ -117,9 +269,6 @@ class PreprocessedTensorDataset(Dataset):
         try:
             child = safe_path(raw)
             if os.path.exists(child):
-                logger.debug(
-                    f"Resolved legacy manifest path via safe root: {raw}"
-                )
                 return child
         except ValueError:
             pass
@@ -127,19 +276,74 @@ class PreprocessedTensorDataset(Dataset):
         logger.warning(f"Skipping unresolvable manifest path: {raw}")
         return None
 
+    def _resolve_manifest_entry(self, raw: Any) -> Optional[Dict[str, Any]]:
+        """Resolve a manifest entry from either legacy or sharded format."""
+        if isinstance(raw, str):
+            resolved = self._resolve_manifest_path(raw)
+            if resolved is None:
+                return None
+            return {"type": "file", "path": resolved}
+
+        if isinstance(raw, dict) and "shard" in raw and "index" in raw:
+            shard_rel = raw.get("shard")
+            shard_index = raw.get("index")
+            if not isinstance(shard_rel, str) or not isinstance(shard_index, int) or shard_index < 0:
+                logger.warning(f"Skipping invalid shard entry: {raw}")
+                return None
+            resolved = self._resolve_manifest_path(shard_rel)
+            if resolved is None:
+                return None
+            return {"type": "shard", "path": resolved, "index": shard_index}
+
+        logger.warning(f"Skipping unsupported manifest entry: {raw}")
+        return None
+
+    def _load_shard_samples(self, shard_path: str) -> List[Dict[str, Any]]:
+        """Load a shard file and return its sample list with small LRU caching."""
+        cached = self._shard_cache.get(shard_path)
+        if cached is not None:
+            self._shard_cache.move_to_end(shard_path)
+            return cached
+
+        data = _load_tensor_file(shard_path)
+        samples = data.get("samples", []) if isinstance(data, dict) else []
+        if not isinstance(samples, list):
+            raise ValueError(f"Invalid shard format: {shard_path}")
+
+        self._shard_cache[shard_path] = samples
+        self._shard_cache.move_to_end(shard_path)
+        while len(self._shard_cache) > self._shard_cache_size:
+            self._shard_cache.popitem(last=False)
+        return samples
+
     def __len__(self) -> int:
-        return len(self.valid_paths)
-    
+        return len(self.sample_refs)
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Load a preprocessed tensor file.
-        
+
         Returns:
             Dictionary containing all pre-computed tensors for training
         """
-        tensor_path = self.valid_paths[idx]
-        data = torch.load(tensor_path, map_location='cpu', weights_only=True)
-        
-        return {
+        if self.cache_size > 0:
+            cached = self._sample_cache.get(idx)
+            if cached is not None:
+                self._sample_cache.move_to_end(idx)
+                return cached
+
+        ref = self.sample_refs[idx]
+        if ref["type"] == "file":
+            data = _load_tensor_file(ref["path"])
+        else:
+            shard_samples = self._load_shard_samples(ref["path"])
+            shard_index = int(ref["index"])
+            if shard_index >= len(shard_samples):
+                raise IndexError(
+                    f"Shard index out of range: {shard_index} >= {len(shard_samples)} for {ref['path']}"
+                )
+            data = shard_samples[shard_index]
+
+        sample = {
             "target_latents": data["target_latents"],  # [T, 64]
             "attention_mask": data["attention_mask"],  # [T]
             "encoder_hidden_states": data["encoder_hidden_states"],  # [L, D]
@@ -148,82 +352,83 @@ class PreprocessedTensorDataset(Dataset):
             "metadata": data.get("metadata", {}),
         }
 
+        if self.cache_size > 0:
+            self._sample_cache[idx] = sample
+            self._sample_cache.move_to_end(idx)
+            if len(self._sample_cache) > self.cache_size:
+                self._sample_cache.popitem(last=False)
+
+        return sample
+
 
 def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     """Collate function for preprocessed tensor batches.
-    
+
     Handles variable-length tensors by padding to the longest in the batch.
-    
+    Uses pre-allocated zero tensors to reduce memory fragmentation.
+
     Args:
         batch: List of sample dictionaries with pre-computed tensors
-        
+
     Returns:
         Batched dictionary with all tensors stacked
     """
-    # Get max lengths
+    bsz = len(batch)
     max_latent_len = max(s["target_latents"].shape[0] for s in batch)
     max_encoder_len = max(s["encoder_hidden_states"].shape[0] for s in batch)
-    
-    # Pad and stack tensors
-    target_latents = []
-    attention_masks = []
-    encoder_hidden_states = []
-    encoder_attention_masks = []
-    context_latents = []
-    
-    for sample in batch:
-        # Pad target_latents [T, 64] -> [max_T, 64]
+
+    latent_dim = batch[0]["target_latents"].shape[1]
+    context_dim = batch[0]["context_latents"].shape[1]
+    encoder_dim = batch[0]["encoder_hidden_states"].shape[1]
+
+    # Pre-allocate padded tensors (zeros) in one shot
+    tl0 = batch[0]["target_latents"]
+    am0 = batch[0]["attention_mask"]
+    cl0 = batch[0]["context_latents"]
+    ehs0 = batch[0]["encoder_hidden_states"]
+    eam0 = batch[0]["encoder_attention_mask"]
+
+    target_latents = tl0.new_zeros((bsz, max_latent_len, latent_dim))
+    attention_masks = am0.new_zeros((bsz, max_latent_len))
+    context_latents = cl0.new_zeros((bsz, max_latent_len, context_dim))
+    encoder_hidden_states = ehs0.new_zeros((bsz, max_encoder_len, encoder_dim))
+    encoder_attention_masks = eam0.new_zeros((bsz, max_encoder_len))
+
+    for i, sample in enumerate(batch):
         tl = sample["target_latents"]
-        if tl.shape[0] < max_latent_len:
-            pad = tl.new_zeros(max_latent_len - tl.shape[0], tl.shape[1])
-            tl = torch.cat([tl, pad], dim=0)
-        target_latents.append(tl)
-        
-        # Pad attention_mask [T] -> [max_T]
+        tl_len = int(tl.shape[0])
+        target_latents[i, :tl_len] = tl
+
         am = sample["attention_mask"]
-        if am.shape[0] < max_latent_len:
-            pad = am.new_zeros(max_latent_len - am.shape[0])
-            am = torch.cat([am, pad], dim=0)
-        attention_masks.append(am)
-        
-        # Pad context_latents [T, 65] -> [max_T, 65]
+        attention_masks[i, :tl_len] = am
+
         cl = sample["context_latents"]
-        if cl.shape[0] < max_latent_len:
-            pad = cl.new_zeros(max_latent_len - cl.shape[0], cl.shape[1])
-            cl = torch.cat([cl, pad], dim=0)
-        context_latents.append(cl)
-        
-        # Pad encoder_hidden_states [L, D] -> [max_L, D]
+        context_latents[i, :tl_len] = cl
+
         ehs = sample["encoder_hidden_states"]
-        if ehs.shape[0] < max_encoder_len:
-            pad = ehs.new_zeros(max_encoder_len - ehs.shape[0], ehs.shape[1])
-            ehs = torch.cat([ehs, pad], dim=0)
-        encoder_hidden_states.append(ehs)
-        
-        # Pad encoder_attention_mask [L] -> [max_L]
+        ehs_len = int(ehs.shape[0])
+        encoder_hidden_states[i, :ehs_len] = ehs
+
         eam = sample["encoder_attention_mask"]
-        if eam.shape[0] < max_encoder_len:
-            pad = eam.new_zeros(max_encoder_len - eam.shape[0])
-            eam = torch.cat([eam, pad], dim=0)
-        encoder_attention_masks.append(eam)
-    
+        encoder_attention_masks[i, :ehs_len] = eam
+
     return {
-        "target_latents": torch.stack(target_latents),  # [B, T, 64]
-        "attention_mask": torch.stack(attention_masks),  # [B, T]
-        "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
-        "encoder_attention_mask": torch.stack(encoder_attention_masks),  # [B, L]
-        "context_latents": torch.stack(context_latents),  # [B, T, 65]
+        "target_latents": target_latents,           # [B, T, 64]
+        "attention_mask": attention_masks,           # [B, T]
+        "encoder_hidden_states": encoder_hidden_states,  # [B, L, D]
+        "encoder_attention_mask": encoder_attention_masks,  # [B, L]
+        "context_latents": context_latents,          # [B, T, 65]
         "metadata": [s["metadata"] for s in batch],
     }
 
 
 class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
     """DataModule for preprocessed tensor files.
-    
+
     This is the recommended DataModule for training. It loads pre-computed tensors
     directly without needing VAE, text encoder, or condition encoder at training time.
     """
-    
+
     def __init__(
         self,
         tensor_dir: str,
@@ -233,20 +438,22 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         prefetch_factor: int = 2,
         persistent_workers: bool = True,
         pin_memory_device: str = "",
+        sample_cache_size: int = 0,
         val_split: float = 0.0,
     ):
         """Initialize the data module.
-        
+
         Args:
             tensor_dir: Directory containing preprocessed .pt files
             batch_size: Training batch size
             num_workers: Number of data loading workers
             pin_memory: Whether to pin memory for faster GPU transfer
+            sample_cache_size: Number of decoded samples to cache per worker
             val_split: Fraction of data for validation (0 = no validation)
         """
         if LIGHTNING_AVAILABLE:
             super().__init__()
-        
+
         self.tensor_dir = tensor_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -254,29 +461,33 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.pin_memory_device = pin_memory_device
+        self.sample_cache_size = sample_cache_size
         self.val_split = val_split
-        
+
         self.train_dataset = None
         self.val_dataset = None
-    
+
     def setup(self, stage: Optional[str] = None):
         """Setup datasets."""
         if stage == 'fit' or stage is None:
             # Create full dataset
-            full_dataset = PreprocessedTensorDataset(self.tensor_dir)
-            
+            full_dataset = PreprocessedTensorDataset(
+                self.tensor_dir,
+                cache_size=self.sample_cache_size,
+            )
+
             # Split if validation requested
             if self.val_split > 0 and len(full_dataset) > 1:
                 n_val = max(1, int(len(full_dataset) * self.val_split))
                 n_train = len(full_dataset) - n_val
-                
+
                 self.train_dataset, self.val_dataset = torch.utils.data.random_split(
                     full_dataset, [n_train, n_val]
                 )
             else:
                 self.train_dataset = full_dataset
                 self.val_dataset = None
-    
+
     def train_dataloader(self) -> DataLoader:
         """Create training dataloader."""
         prefetch_factor = None if self.num_workers == 0 else self.prefetch_factor
@@ -323,16 +534,16 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
 
 class AceStepTrainingDataset(Dataset):
     """Dataset for ACE-Step LoRA training from raw audio.
-    
+
     DEPRECATED: Use PreprocessedTensorDataset instead for better performance.
-    
+
     Audio Format Requirements (handled automatically):
     - Sample rate: 48kHz (resampled if different)
     - Channels: Stereo (2 channels, mono is duplicated)
     - Max duration: 240 seconds (4 minutes)
     - Min duration: 5 seconds (padded if shorter)
     """
-    
+
     def __init__(
         self,
         samples: List[Dict[str, Any]],
@@ -345,10 +556,10 @@ class AceStepTrainingDataset(Dataset):
         self.dit_handler = dit_handler
         self.max_duration = max_duration
         self.target_sample_rate = target_sample_rate
-        
+
         self.valid_samples = self._validate_samples()
         logger.info(f"Dataset initialized with {len(self.valid_samples)} valid samples")
-    
+
     def _validate_samples(self) -> List[Dict[str, Any]]:
         """Validate and filter samples, resolving audio paths to safe paths."""
         valid = []
@@ -367,7 +578,7 @@ class AceStepTrainingDataset(Dataset):
             if not os.path.isfile(validated):
                 logger.warning(f"Sample {i}: Audio file not found: {audio_path}")
                 continue
-            
+
             if not sample.get("caption"):
                 logger.warning(f"Sample {i}: Missing caption")
                 continue
@@ -375,40 +586,40 @@ class AceStepTrainingDataset(Dataset):
             # Store validated path so downstream code never uses raw user input
             sample = {**sample, "audio_path": validated}
             valid.append(sample)
-        
+
         return valid
-    
+
     def __len__(self) -> int:
         return len(self.valid_samples)
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single training sample."""
         sample = self.valid_samples[idx]
-        
+
         audio_path = sample["audio_path"]
         audio, sr = torchaudio.load(audio_path)
-        
+
         # Resample to 48kHz
         if sr != self.target_sample_rate:
             resampler = torchaudio.transforms.Resample(sr, self.target_sample_rate)
             audio = resampler(audio)
-        
+
         # Convert to stereo
         if audio.shape[0] == 1:
             audio = audio.repeat(2, 1)
         elif audio.shape[0] > 2:
             audio = audio[:2, :]
-        
+
         # Truncate/pad
         max_samples = int(self.max_duration * self.target_sample_rate)
         if audio.shape[1] > max_samples:
             audio = audio[:, :max_samples]
-        
+
         min_samples = int(5.0 * self.target_sample_rate)
         if audio.shape[1] < min_samples:
             padding = min_samples - audio.shape[1]
             audio = torch.nn.functional.pad(audio, (0, padding))
-        
+
         return {
             "audio": audio,
             "caption": sample.get("caption", ""),
@@ -430,25 +641,25 @@ class AceStepTrainingDataset(Dataset):
 def collate_training_batch(batch: List[Dict]) -> Dict[str, Any]:
     """Collate function for raw audio batches (legacy)."""
     max_len = max(sample["audio"].shape[1] for sample in batch)
-    
+
     padded_audio = []
     attention_masks = []
-    
+
     for sample in batch:
         audio = sample["audio"]
         audio_len = audio.shape[1]
-        
+
         if audio_len < max_len:
             padding = max_len - audio_len
             audio = torch.nn.functional.pad(audio, (0, padding))
-        
+
         padded_audio.append(audio)
-        
+
         mask = torch.ones(max_len)
         if audio_len < max_len:
             mask[audio_len:] = 0
         attention_masks.append(mask)
-    
+
     return {
         "audio": torch.stack(padded_audio),
         "attention_mask": torch.stack(attention_masks),
@@ -461,10 +672,10 @@ def collate_training_batch(batch: List[Dict]) -> Dict[str, Any]:
 
 class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
     """DataModule for raw audio loading (legacy).
-    
+
     DEPRECATED: Use PreprocessedDataModule for better training performance.
     """
-    
+
     def __init__(
         self,
         samples: List[Dict[str, Any]],
@@ -477,7 +688,7 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
     ):
         if LIGHTNING_AVAILABLE:
             super().__init__()
-        
+
         self.samples = samples
         self.dit_handler = dit_handler
         self.batch_size = batch_size
@@ -485,24 +696,24 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
         self.pin_memory = pin_memory
         self.max_duration = max_duration
         self.val_split = val_split
-        
+
         self.train_dataset = None
         self.val_dataset = None
-    
+
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
             if self.val_split > 0 and len(self.samples) > 1:
                 n_val = max(1, int(len(self.samples) * self.val_split))
-                
+
                 indices = list(range(len(self.samples)))
                 random.shuffle(indices)
-                
+
                 val_indices = indices[:n_val]
                 train_indices = indices[n_val:]
-                
+
                 train_samples = [self.samples[i] for i in train_indices]
                 val_samples = [self.samples[i] for i in val_indices]
-                
+
                 self.train_dataset = AceStepTrainingDataset(
                     train_samples, self.dit_handler, self.max_duration
                 )
@@ -514,7 +725,7 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
                     self.samples, self.dit_handler, self.max_duration
                 )
                 self.val_dataset = None
-    
+
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.train_dataset,
@@ -525,11 +736,11 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
             collate_fn=collate_training_batch,
             drop_last=True,
         )
-    
+
     def val_dataloader(self) -> Optional[DataLoader]:
         if self.val_dataset is None:
             return None
-        
+
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
@@ -558,8 +769,8 @@ def load_dataset_from_json(json_path: str) -> Tuple[List[Dict[str, Any]], Dict[s
 
     with open(validated, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     metadata = data.get("metadata", {})
     samples = data.get("samples", [])
-    
+
     return samples, metadata

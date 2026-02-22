@@ -1,0 +1,190 @@
+2431: 
+2432:             # OK - cleanest practical approach: temporarily replace self.decoder.forward
+2433:             # to track batch sizes and catch the mismatch. NO - too complex.
+2434: 
+2435:             # FINAL APPROACH: Just re-implement generate_audio with the fix inlined.
+2436:             # Copy the logic from the model but with the fix applied.
+2437: 
+2438:             text_hidden_states = kwargs["text_hidden_states"]
+2439:             text_attention_mask = kwargs["text_attention_mask"]
+2440:             lyric_hidden_states = kwargs["lyric_hidden_states"]
+2441:             lyric_attention_mask = kwargs["lyric_attention_mask"]
+2442:             refer_audio_acoustic_hidden_states_packed = kwargs["refer_audio_acoustic_hidden_states_packed"]
+2443:             refer_audio_order_mask = kwargs["refer_audio_order_mask"]
+2444:             src_latents = kwargs["src_latents"]
+2445:             chunk_masks = kwargs["chunk_masks"]
+2446:             is_covers = kwargs["is_covers"]
+2447:             silence_latent = kwargs.get("silence_latent", None)
+2448:             attention_mask = kwargs.get("attention_mask", None)
+2449:             non_cover_text_hidden_states = kwargs.get("non_cover_text_hidden_states", None)
+2450:             non_cover_text_attention_mask = kwargs.get("non_cover_text_attention_mask", None)
+2451:             precomputed_lm_hints_25Hz = kwargs.get("precomputed_lm_hints_25Hz", None)
+2452:             audio_codes = kwargs.get("audio_codes", None)
+2453: 
+2454:             if attention_mask is None:
+2455:                 latent_length = src_latents.shape[1]
+2456:                 attention_mask = torch.ones(src_latents.shape[0], latent_length, device=src_latents.device, dtype=src_latents.dtype)
+2457: 
+2458:             time_costs = {}
+2459:             start_time = _time.time()
+2460:             total_start_time = start_time
+2461: 
+2462:             # prepare_condition for cover
+2463:             encoder_hidden_states, encoder_attention_mask, context_latents = self_model.prepare_condition(
+2464:                 text_hidden_states=text_hidden_states,
+2465:                 text_attention_mask=text_attention_mask,
+2466:                 lyric_hidden_states=lyric_hidden_states,
+2467:                 lyric_attention_mask=lyric_attention_mask,
+2468:                 refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
+2469:                 refer_audio_order_mask=refer_audio_order_mask,
+2470:                 hidden_states=src_latents,
+2471:                 attention_mask=attention_mask,
+2472:                 silence_latent=silence_latent,
+2473:                 src_latents=src_latents,
+2474:                 chunk_masks=chunk_masks,
+2475:                 is_covers=is_covers,
+2476:                 precomputed_lm_hints_25Hz=precomputed_lm_hints_25Hz,
+2477:                 audio_codes=audio_codes,
+2478:             )
+2479: 
+2480:             # prepare_condition for non-cover
+2481:             encoder_hidden_states_non_cover = None
+2482:             encoder_attention_mask_non_cover = None
+2483:             context_latents_non_cover = None
+2484:             non_is_covers = torch.zeros_like(is_covers, device=is_covers.device, dtype=is_covers.dtype)
+2485:             silence_latent_expanded = silence_latent[:, :src_latents.shape[1], :].expand(src_latents.shape[0], -1, -1)
+2486:             encoder_hidden_states_non_cover, encoder_attention_mask_non_cover, context_latents_non_cover = self_model.prepare_condition(
+2487:                 text_hidden_states=non_cover_text_hidden_states,
+2488:                 text_attention_mask=non_cover_text_attention_mask,
+2489:                 lyric_hidden_states=lyric_hidden_states,
+2490:                 lyric_attention_mask=lyric_attention_mask,
+2491:                 refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
+2492:                 refer_audio_order_mask=refer_audio_order_mask,
+2493:                 hidden_states=silence_latent_expanded,
+2494:                 attention_mask=attention_mask,
+2495:                 silence_latent=silence_latent,
+2496:                 src_latents=silence_latent_expanded,
+2497:                 chunk_masks=chunk_masks,
+2498:                 is_covers=non_is_covers,
+2499:                 precomputed_lm_hints_25Hz=None,
+2500:                 audio_codes=None,
+2501:             )
+2502: 
+2503:             end_time = _time.time()
+2504:             time_costs["encoder_time_cost"] = end_time - start_time
+2505:             start_time = end_time
+2506: 
+2507:             # Timesteps
+2508:             device, dtype = context_latents.device, context_latents.dtype
+2509:             if timesteps_arg is not None:
+2510:                 t = timesteps_arg.to(device=device, dtype=dtype)
+2511:                 infer_steps = len(t) - 1
+2512:             else:
+2513:                 t = torch.linspace(1.0, 0.0, infer_steps + 1, device=device, dtype=dtype)
+2514:                 if shift != 1.0:
+2515:                     t = shift * t / (1 + (shift - 1) * t)
+2516: 
+2517:             cover_steps = int(infer_steps * audio_cover_strength)
+2518:             if use_progress_bar:
+2519:                 iterator = tqdm(zip(t[:-1], t[1:]), total=infer_steps)
+2520:             else:
+2521:                 iterator = zip(t[:-1], t[1:])
+2522: 
+2523:             noise = self_model.prepare_noise(context_latents, seed)
+2524:             bsz = context_latents.shape[0]
+2525:             past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
+2526:             # Import guidance functions from the model's own module
+2527:             _model_module = type(self_model).__module__
+2528:             _pkg = _model_module.rsplit(".", 1)[0] if "." in _model_module else _model_module
+2529:             import importlib
+2530:             _apg_mod = importlib.import_module(f"{_pkg}.apg_guidance")
+2531:             MomentumBuffer = _apg_mod.MomentumBuffer
+2532:             apg_forward = _apg_mod.apg_forward
+2533:             adg_forward = _apg_mod.adg_forward
+2534:             momentum_buffer = MomentumBuffer()
+2535: 
+2536:             # CFG doubling
+2537:             do_cfg_guidance = diffusion_guidance_sale > 1.0
+2538:             if do_cfg_guidance:
+2539:                 encoder_hidden_states = torch.cat([encoder_hidden_states, self_model.null_condition_emb.expand_as(encoder_hidden_states)], dim=0)
+2540:                 encoder_attention_mask = torch.cat([encoder_attention_mask, encoder_attention_mask], dim=0)
+2541:                 context_latents = torch.cat([context_latents, context_latents], dim=0)
+2542:                 attention_mask = torch.cat([attention_mask, attention_mask], dim=0)
+2543: 
+2544:             # ── FIX: Pre-double non-cover conditions ONCE before the loop ──
+2545:             if do_cfg_guidance and encoder_hidden_states_non_cover is not None:
+2546:                 encoder_hidden_states_non_cover = torch.cat([encoder_hidden_states_non_cover, self_model.null_condition_emb.expand_as(encoder_hidden_states_non_cover)], dim=0)
+2547:                 encoder_attention_mask_non_cover = torch.cat([encoder_attention_mask_non_cover, encoder_attention_mask_non_cover], dim=0)
+2548:                 context_latents_non_cover = torch.cat([context_latents_non_cover, context_latents_non_cover], dim=0)
+2549: 
+2550:             xt = noise
+2551:             prev_pred_clean = None
+2552:             _swapped_to_non_cover = False
+2553:             with torch.no_grad():
+2554:                 for step_idx, (t_curr, t_prev) in enumerate(iterator):
+2555:                     # ── FIX: One-shot swap with flag ──
+2556:                     if step_idx >= cover_steps and not _swapped_to_non_cover:
+2557:                         _swapped_to_non_cover = True
+2558:                         encoder_hidden_states = encoder_hidden_states_non_cover
+2559:                         encoder_attention_mask = encoder_attention_mask_non_cover
+2560:                         context_latents = context_latents_non_cover
+2561:                         past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
+2562: 
+2563:                     x = torch.cat([xt, xt], dim=0) if do_cfg_guidance else xt
+2564:                     t_curr_tensor = t_curr * torch.ones((x.shape[0],), device=device, dtype=dtype)
+2565:                     decoder_outputs = self_model.decoder(
+2566:                         hidden_states=x,
+2567:                         timestep=t_curr_tensor,
+2568:                         timestep_r=t_curr_tensor,
+2569:                         attention_mask=attention_mask,
+2570:                         encoder_hidden_states=encoder_hidden_states,
+2571:                         encoder_attention_mask=encoder_attention_mask,
+2572:                         context_latents=context_latents,
+2573:                         use_cache=True,
+2574:                         past_key_values=past_key_values,
+2575:                     )
+2576: 
+2577:                     vt = decoder_outputs[0]
+2578:                     past_key_values = decoder_outputs[1]
+2579:                     apply_cfg_guidance = t_curr >= cfg_interval_start and t_curr <= cfg_interval_end
+2580:                     if do_cfg_guidance:
+2581:                         pred_cond, pred_null_cond = vt.chunk(2)
+2582:                         if apply_cfg_guidance:
+2583:                             if not use_adg:
+2584:                                 vt = apg_forward(
+2585:                                     pred_cond=pred_cond,
+2586:                                     pred_uncond=pred_null_cond,
+2587:                                     guidance_scale=diffusion_guidance_sale,
+2588:                                     momentum_buffer=momentum_buffer,
+2589:                                     dims=[1],
+2590:                                 )
+2591:                             else:
+2592:                                 vt = adg_forward(
+2593:                                     latents=xt,
+2594:                                     noise_pred_cond=pred_cond,
+2595:                                     noise_pred_uncond=pred_null_cond,
+2596:                                     sigma=t_curr,
+2597:                                     guidance_scale=diffusion_guidance_sale,
+2598:                                 )
+2599:                         else:
+2600:                             vt = pred_cond
+2601: 
+2602:                     # Update x_t (Euler ODE by default)
+2603:                     if infer_method == "sde":
+2604:                         pred_clean = xt - t_curr * vt
+2605:                         noise_new = torch.randn_like(xt)
+2606:                         xt = pred_clean + t_prev * (vt + 0.0 * noise_new)
+2607:                     else:
+2608:                         dt = t_prev - t_curr
+2609:                         xt = xt + dt * vt
+2610: 
+2611:             end_time = _time.time()
+2612:             time_costs["diffusion_time_cost"] = end_time - start_time
+2613:             time_costs["diffusion_per_step_time_cost"] = time_costs["diffusion_time_cost"] / max(infer_steps, 1)
+2614:             time_costs["total_time_cost"] = end_time - total_start_time
+2615: 
+2616:             return {"target_latents": xt, "time_costs": time_costs}
+2617: 
+2618:         # Bind the patched method
+2619:         model.generate_audio = types.MethodType(_patched_generate_audio, model)
+2620:         logger.info("[_patch_generate_audio_cfg_fix] generate_audio patched successfully")

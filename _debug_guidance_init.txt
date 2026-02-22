@@ -1,0 +1,22 @@
+1911:             context_latents = torch.cat([context_latents, context_latents], dim=0)
+1912:             attention_mask = torch.cat([attention_mask, attention_mask], dim=0)
+1913:         
+1914:         from acestep.core.generation.solvers import get_solver, VALID_SOLVERS
+1915:         from acestep.core.generation.guidance import get_guidance, VALID_GUIDANCE
+1916: 
+1917:         # Map legacy method names to solver names
+1918:         solver_name = {"ode": "euler", "sde": "euler", "dpmsde": "euler"}.get(infer_method, infer_method)
+1919:         solver_fn, needs_model_fn = get_solver(solver_name)
+1920: 
+1921:         # Get guidance function
+1922:         _gm = guidance_mode if guidance_mode else "apg"
+1923:         # Legacy: if use_adg was passed via kwargs, map accordingly
+1924:         if kwargs.get("use_adg", False) and _gm == "apg":
+1925:             _gm = "adg"
+1926:         guidance_fn = get_guidance(_gm)
+1927: 
+1928:         # Build model_fn callback for multi-evaluation solvers (Heun, RK4)
+1929:         # This wraps decoder call + CFG in a single function: model_fn(xt, t) -> vt
+1930:         model_fn = None
+1931:         if needs_model_fn:
+1932:             def _make_model_fn(decoder, do_cfg, attention_mask, encoder_hs, encoder_am,

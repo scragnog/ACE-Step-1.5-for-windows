@@ -126,13 +126,20 @@ class GenerationParams:
     seed: int = -1
     guidance_scale: float = 7.0
     use_adg: bool = False
+    guidance_mode: str = ""
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
     shift: float = 1.0
-    infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
+    infer_method: str = "ode"  # "ode", "sde", or "dpmsde" - diffusion inference method
     # Custom timesteps (parsed from string like "0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0")
     # If provided, overrides inference_steps and shift
     timesteps: Optional[List[float]] = None
+
+    # PAG (Perturbed-Attention Guidance)
+    use_pag: bool = False
+    pag_start: float = 0.30
+    pag_end: float = 0.80
+    pag_scale: float = 0.2
 
     repainting_start: float = 0.0
     repainting_end: float = -1
@@ -159,6 +166,11 @@ class GenerationParams:
     cot_vocal_language: str = "unknown"
     cot_caption: str = ""
     cot_lyrics: str = ""
+
+    # Steering Parameters
+    steering_enabled: bool = False
+    steering_loaded: List[str] = field(default_factory=list)
+    steering_alphas: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for JSON serialization."""
@@ -603,13 +615,21 @@ def generate_music(
             cover_noise_strength=params.cover_noise_strength,
             task_type=params.task_type,
             use_adg=params.use_adg,
+            guidance_mode=params.guidance_mode if hasattr(params, 'guidance_mode') else "",
             cfg_interval_start=params.cfg_interval_start,
             cfg_interval_end=params.cfg_interval_end,
             shift=params.shift,
             infer_method=params.infer_method,
             timesteps=params.timesteps,
+            use_pag=params.use_pag,
+            pag_start=params.pag_start,
+            pag_end=params.pag_end,
+            pag_scale=params.pag_scale,
             latent_shift=params.latent_shift,
             latent_rescale=params.latent_rescale,
+            steering_enabled=params.steering_enabled,
+            steering_loaded=params.steering_loaded,
+            steering_alphas=params.steering_alphas,
             progress=progress,
         )
 

@@ -91,6 +91,11 @@ def get_audio_duration(audio_path: str) -> int:
     # Primary: torchcodec (ships with torchaudio >=2.9, supports all ffmpeg formats)
     # Note: torchcodec is optional on ROCM/Intel platforms due to CUDA dependencies
     try:
+        from mutagen import File as MutagenFile
+
+        audio = MutagenFile(audio_path)
+        if audio is not None:
+            return int(audio.info.length)
         from torchcodec.decoders import AudioDecoder
         decoder = AudioDecoder(validated)
         return int(decoder.metadata.duration_seconds)

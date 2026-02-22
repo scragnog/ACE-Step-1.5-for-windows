@@ -5,6 +5,19 @@ Encapsulates all data processing and business logic as a bridge between model an
 import os
 import sys
 
+# ---- File-based generation log for diagnostics ----
+# All loguru output is also written to logs/generation.log for offline comparison
+_gen_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+os.makedirs(_gen_log_dir, exist_ok=True)
+from loguru import logger as _early_logger
+_early_logger.add(
+    os.path.join(_gen_log_dir, "generation.log"),
+    rotation="10 MB",
+    retention=3,
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<7} | {message}",
+    level="DEBUG",
+)
+
 # Disable tokenizers parallelism to avoid fork warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -52,7 +65,10 @@ from acestep.core.generation.handler import (
     ServiceGenerateRequestMixin,
     ServiceGenerateExecuteMixin,
     ServiceGenerateOutputsMixin,
+    SteeringMixin,
 )
+from acestep.core.generation.handler.lora.advanced_adapter_mixin import AdvancedAdapterMixin
+from acestep.gpu_config import get_gpu_memory_gb, get_global_gpu_config, get_effective_free_vram_gb
 
 
 warnings.filterwarnings("ignore")
@@ -76,6 +92,7 @@ class AceStepHandler(
     InitServiceMixin,
     LyricScoreMixin,
     LyricTimestampMixin,
+    AdvancedAdapterMixin,
     LoraManagerMixin,
     MemoryUtilsMixin,
     MetadataMixin,
@@ -96,6 +113,7 @@ class AceStepHandler(
     ServiceGenerateRequestMixin,
     ServiceGenerateExecuteMixin,
     ServiceGenerateOutputsMixin,
+    SteeringMixin,
 ):
     """ACE-Step Business Logic Handler"""
     
@@ -157,6 +175,17 @@ class AceStepHandler(
         self._active_loras = {}  # adapter_name -> scale (per-adapter)
         self._lora_adapter_registry = {}  # adapter_name -> explicit scaling targets
         self._lora_active_adapter = None
+
+        # Advanced adapter state (slot-based weight-space merging)
+        self._adapter_slots = {}      # slot_id -> {path, name, type, delta, scale, group_scales}
+        self._next_slot_id = 0
+        self._merged_dirty = False
+        self.lora_group_scales = {"self_attn": 1.0, "cross_attn": 1.0, "mlp": 1.0}
+
+        # Activation steering (TADA)
+        self.steering_enabled = False
+        self.steering_vectors = {}      # concept_name -> loaded vector dict
+        self.steering_config = {}       # concept_name -> {"alpha": float, "layers": str, "mode": str}
 
         # MLX DiT acceleration (macOS Apple Silicon only)
         self.mlx_decoder = None

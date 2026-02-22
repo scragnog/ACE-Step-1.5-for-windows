@@ -51,6 +51,7 @@ class PreprocessMixin:
         dit_handler,
         output_dir: str,
         max_duration: float = 240.0,
+        skip_existing: bool = False,
         preprocess_mode: str = "lora",
         progress_callback=None,
     ) -> Tuple[List[str], str]:
@@ -93,6 +94,7 @@ class PreprocessMixin:
         output_paths: List[str] = []
         success_count = 0
         fail_count = 0
+        skip_count = 0
 
         model = dit_handler.model
         vae = dit_handler.vae
@@ -102,16 +104,71 @@ class PreprocessMixin:
         device = dit_handler.device
         dtype = dit_handler.dtype
 
+        missing = []
+        if vae is None:
+            missing.append("vae")
+        if text_encoder is None:
+            missing.append("text_encoder")
+        if text_tokenizer is None:
+            missing.append("text_tokenizer")
+        if silence_latent is None:
+            missing.append("silence_latent")
+        if device is None:
+            missing.append("device")
+        if dtype is None:
+            missing.append("dtype")
+        if missing:
+            return [], f"❌ Model components not initialized: {', '.join(missing)}. Please initialize the service first."
+
+        if not hasattr(vae, "parameters"):
+            return [], "❌ Invalid VAE object. Please re-initialize the service."
+        if not hasattr(text_encoder, "parameters"):
+            return [], "❌ Invalid text encoder object. Please re-initialize the service."
+        if not hasattr(model, "parameters"):
+            return [], "❌ Invalid model object. Please re-initialize the service."
+
+        device = device if isinstance(device, torch.device) else torch.device(device)
+
+        def _device_compatible(actual: torch.device, expected: torch.device) -> bool:
+            if actual.type != expected.type:
+                return False
+            if expected.index is None:
+                return True
+            return actual.index == expected.index
+
+        vae_param = next(vae.parameters(), None)
+        vae_device = getattr(vae_param, "device", device)
+        if not _device_compatible(vae_device, device):
+            raise RuntimeError(f"VAE is on {vae_device}, expected {device}")
+
+        text_param = next(text_encoder.parameters(), None)
+        text_device = getattr(text_param, "device", device)
+        if not _device_compatible(text_device, device):
+            raise RuntimeError(f"Text encoder is on {text_device}, expected {device}")
+
+        if not _device_compatible(silence_latent.device, device):
+            raise RuntimeError(f"silence_latent is on {silence_latent.device}, expected {device}")
+
         target_sample_rate = 48000
 
         genre_indices = select_genre_indices(labeled_samples, self.metadata.genre_ratio)
         debug_log_verbose_for("dataset", f"selected genre indices: count={len(genre_indices)}")
 
-        for i, sample in enumerate(labeled_samples):
+        # Use inference_mode for the entire loop – faster than per-call no_grad
+        # because it also disables autograd view-tracking.
+        with torch.inference_mode():
+          for i, sample in enumerate(labeled_samples):
             try:
                 debug_log_verbose_for("dataset", f"sample[{i}] id={sample.id} file={sample.filename}")
                 if progress_callback:
                     progress_callback(f"Preprocessing {i+1}/{len(labeled_samples)}: {sample.filename}")
+
+                output_path = os.path.join(output_dir, f"{sample.id}.pt")
+                if skip_existing and os.path.exists(output_path):
+                    output_paths.append(output_path)
+                    success_count += 1
+                    skip_count += 1
+                    continue
 
                 use_genre = i in genre_indices
 
@@ -154,7 +211,7 @@ class PreprocessMixin:
 
                 if i == 0:
                     logger.info(f"\n{'='*70}")
-                    logger.info("🔍 [DEBUG] DiT TEXT ENCODER INPUT (Training Preprocess)")
+                    logger.info("[DEBUG] DiT TEXT ENCODER INPUT (Training Preprocess)")
                     logger.info(f"{'='*70}")
                     logger.info(f"text_prompt:\n{text_prompt}")
                     logger.info(f"{'='*70}\n")
@@ -228,11 +285,8 @@ class PreprocessMixin:
                         refer_audio_order_mask=refer_audio_order_mask_val,
                     )
                 debug_end_verbose_for("dataset", f"run_encoder[{i}]", t0)
-                debug_log_verbose_for(
-                    "dataset",
-                    f"encoder_hidden_states shape={tuple(encoder_hidden_states.shape)} "
-                    f"encoder_attention_mask shape={tuple(encoder_attention_mask.shape)}",
-                )
+
+                del text_hidden_states, text_attention_mask, lyric_hidden_states, lyric_attention_mask
 
                 _empty_gpu_cache()
 
@@ -267,25 +321,31 @@ class PreprocessMixin:
                         "preprocess_mode": mode,
                     },
                 }
-
-                output_path = os.path.join(output_dir, f"{sample.id}.pt")
                 t0 = debug_start_verbose_for("dataset", f"torch.save[{i}]")
                 torch.save(output_data, output_path)
                 debug_end_verbose_for("dataset", f"torch.save[{i}]", t0)
+                del output_data
                 output_paths.append(output_path)
                 success_count += 1
+
+                del target_latents, attention_mask, encoder_hidden_states, encoder_attention_mask, context_latents
+
+                if device.type == "cuda" and (i + 1) % 8 == 0:
+                    torch.cuda.empty_cache()
 
             except Exception as e:
                 logger.exception(f"Error preprocessing {sample.filename}")
                 fail_count += 1
                 if progress_callback:
-                    progress_callback(f"❌ Failed: {sample.filename}: {str(e)}")
+                    progress_callback(f"Failed: {sample.filename}: {str(e)}")
 
         t0 = debug_start_verbose_for("dataset", "save_manifest")
         save_manifest(output_dir, self.metadata, output_paths)
         debug_end_verbose_for("dataset", "save_manifest", t0)
 
         status = f"✅ Preprocessed {success_count}/{len(labeled_samples)} samples to {output_dir}"
+        if skip_count > 0:
+            status += f" ({skip_count} skipped)"
         if fail_count > 0:
             status += f" ({fail_count} failed)"
 

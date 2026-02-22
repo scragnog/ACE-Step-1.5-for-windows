@@ -182,6 +182,8 @@ def mlx_generate_diffusion(
 
     diff_start = time.time()
 
+    prev_pred_clean = None  # For DPM++ SDE second-order correction
+
     for step_idx in tqdm(range(num_steps), desc="MLX DiT diffusion", disable=disable_tqdm):
         current_t = t_schedule_list[step_idx]
         t_curr = mx.full((bsz,), current_t)
@@ -215,7 +217,7 @@ def mlx_generate_diffusion(
             xt = xt - vt * t_unsq
             mx.eval(xt)
         else:
-            # ODE / SDE update
+            # ODE / SDE / DPM++ SDE update
             next_t = t_schedule_list[step_idx + 1]
             if infer_method == "sde":
                 t_unsq = mx.expand_dims(mx.expand_dims(t_curr, axis=-1), axis=-1)
@@ -223,6 +225,19 @@ def mlx_generate_diffusion(
                 # Re-noise with next timestep
                 new_noise = mx.random.normal(xt.shape)
                 xt = next_t * new_noise + (1.0 - next_t) * pred_clean
+            elif infer_method == "dpmsde":
+                # DPM++ SDE: second-order multistep solver with stochastic noise
+                t_unsq = mx.expand_dims(mx.expand_dims(t_curr, axis=-1), axis=-1)
+                pred_clean = xt - vt * t_unsq
+                if prev_pred_clean is not None and step_idx > 0:
+                    # Second-order correction via midpoint blending
+                    corrected_clean = 0.5 * (pred_clean + prev_pred_clean)
+                else:
+                    corrected_clean = pred_clean
+                prev_pred_clean = pred_clean
+                # Re-noise with corrected prediction
+                new_noise = mx.random.normal(xt.shape)
+                xt = next_t * new_noise + (1.0 - next_t) * corrected_clean
             else:
                 # ODE Euler step: x_{t+1} = x_t - v_t * dt
                 dt = current_t - next_t

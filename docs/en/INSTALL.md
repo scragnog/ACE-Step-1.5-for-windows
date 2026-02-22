@@ -87,6 +87,8 @@ Ready-to-use launch scripts for all platforms. These scripts handle environment 
 
 | Platform | Script | Description |
 |----------|--------|-------------|
+| **Windows** | `LAUNCH.bat` | **One-click launcher** — loading screen + auto-redirect when ready |
+| **Windows** | `START.bat` | One-click launcher (no loading screen) |
 | **Windows** | `start_gradio_ui.bat` | Launch Gradio Web UI (CUDA) |
 | **Windows** | `start_api_server.bat` | Launch REST API Server (CUDA) |
 | **Windows** | `start_gradio_ui_rocm.bat` | Launch Gradio Web UI (AMD ROCm) |
@@ -97,6 +99,19 @@ Ready-to-use launch scripts for all platforms. These scripts handle environment 
 | **macOS** | `start_api_server_macos.sh` | Launch REST API Server (MLX) |
 
 ### Windows
+
+#### One-Click Launcher (Recommended for `ace-step-ui` users)
+
+Double-click **`LAUNCH.bat`** to start everything at once. This will:
+
+1. Open a loading screen in your browser with real-time service status
+2. Install UI dependencies if needed
+3. Start the Python API server (`3、run_server.ps1`) and UI servers (`4、run_npmgui.ps1`)
+4. Auto-redirect to the app once the API, backend, and frontend are all ready
+
+> `START.bat` does the same without the loading screen — it opens separate windows and launches the browser directly.
+
+#### Individual Scripts
 
 ```bash
 # Launch Gradio Web UI (NVIDIA CUDA)

@@ -271,6 +271,8 @@ Tensor 파일 저장 경로를 입력하고 전처리를 시작한 후 완료를
 
 > 위 수치는 참고용입니다. 실제 상황에 맞게 조정해 주세요.
 
+> **💡 LoKr 추천:** LoKR은 학습 효율을 크게 향상시켰습니다. 이전에 1시간이 걸리던 학습이 이제 단 5분이면 완료됩니다—10배 이상 빠릅니다. 이는 소비자용 GPU에서의 학습에 매우 중요합니다. **Train LoKr** 탭에서 LoKr 학습을 시도하거나, [Side-Step](https://github.com/koda-dernet/Side-Step) 툴킷을 사용하여 CLI 기반 LoKr 워크플로우를 이용할 수 있습니다. 자세한 내용은 [Training Guide](../sidestep/Training%20Guide.md)를 참조하세요.
+
 3. **Start Training**을 클릭하고 학습 완료를 기다립니다.
 
 ![](../pics/07_train.jpg)

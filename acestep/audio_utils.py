@@ -108,10 +108,14 @@ class AudioSaver:
         output_path = Path(output_path)
         
         # Determine extension based on format
-        ext = ".wav" if format == "wav32" else f".{format}"
+        ext = ".wav" if format == "wav32" else (".ogg" if format == "opus" else f".{format}")
         
-        if output_path.suffix.lower() not in ['.flac', '.wav', '.mp3', '.opus', '.aac', '.m4a']:
+        allowed_extensions = ['.flac', '.wav', '.mp3', '.opus', '.ogg', '.aac', '.m4a']
+        if output_path.suffix.lower() not in allowed_extensions:
             output_path = output_path.with_suffix(ext)
+        elif format == "opus" and output_path.suffix.lower() == ".opus":
+             # Enforce .ogg for Opus to ensure correct OGG container handling
+             output_path = output_path.with_suffix(".ogg")
         elif format == "wav32" and output_path.suffix.lower() == ".wav32":
              # Explicitly fix .wav32 extension if present
              output_path = output_path.with_suffix(".wav")
@@ -144,71 +148,77 @@ class AudioSaver:
         # Select backend and save
         try:
             if format in ["mp3", "opus", "aac"]:
-                # MP3, Opus, and AAC use ffmpeg backend
-                torchaudio.save(
-                    str(output_path),
-                    audio_tensor,
-                    sample_rate,
-                    channels_first=True,
-                    backend='ffmpeg',
-                )
+                # MP3, Opus, and AAC: bypass torchaudio.save (which crashes on Windows with libtorchcodec_core8.dll)
+                # Instead, write a temp WAV with soundfile, then encode using the system's ffmpeg subprocess.
+                import soundfile as sf
+                import tempfile
+                
+                audio_np = audio_tensor.transpose(0, 1).numpy()  # [channels, samples] -> [samples, channels]
+                
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
+                    temp_wav_path = temp_wav.name
+                
+                try:
+                    # Write temp WAV
+                    sf.write(temp_wav_path, audio_np, sample_rate, format='WAV', subtype='PCM_16')
+                    
+                    # Call ffmpeg
+                    cmd = ["ffmpeg", "-y", "-i", temp_wav_path]
+                    
+                    # Add format-specific encoding flags if needed
+                    if format == "mp3":
+                        cmd.extend(["-c:a", "libmp3lame", "-q:a", "0"]) # High quality VBR
+                    elif format == "opus":
+                        cmd.extend(["-c:a", "libopus", "-b:a", "128k", "-vbr", "on", "-compression_level", "10", "-f", "ogg"])
+                    elif format == "aac":
+                        cmd.extend(["-c:a", "aac", "-b:a", "256k"])
+                    
+                    cmd.append(str(output_path))
+                    
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    logger.debug(f"[AudioSaver] Saved audio to {output_path} ({format}, {sample_rate}Hz) via ffmpeg subprocess")
+                finally:
+                    # Clean up temp wav file
+                    if os.path.exists(temp_wav_path):
+                        os.remove(temp_wav_path)
+                
+                return str(output_path)
+                
             elif format in ["flac", "wav", "wav32"]:
-                # FLAC and WAV use soundfile backend (fastest)
-                # handle 32-bit float wav
-                if format == "wav32":
-                    try:
-                        import soundfile as sf
-                        
-                        # Use soundfile directly for 32-bit float
-                        audio_np = audio_tensor.transpose(0, 1).numpy() # [channels, samples] -> [samples, channels]
-                        
-                        # Explicitly specify format as WAV to avoid issues with extension detection or custom extensions
+                # FLAC and WAV use soundfile exclusively for speed & stability
+                try:
+                    import soundfile as sf
+                    
+                    audio_np = audio_tensor.transpose(0, 1).numpy()
+                    
+                    if format == "wav32":
                         sf.write(str(output_path), audio_np, sample_rate, subtype='FLOAT', format='WAV')
                         logger.debug(f"[AudioSaver] Saved audio to {output_path} (wav32, {sample_rate}Hz)")
                         return str(output_path)
-                    except Exception as e:
-                        logger.error(f"Failed to save wav32: {e}, falling back to standard wav")
-                        format = "wav"
-                        # Fallthrough to standard wav saving
-
-                torchaudio.save(
-                    str(output_path),
-                    audio_tensor,
-                    sample_rate,
-                    channels_first=True,
-                    backend='soundfile',
-                )
+                    
+                    sf_format = format.upper()
+                    # subtype is determined automatically based on format, but we can enforce defaults
+                    subtype = 'PCM_16' if format == 'wav' else None
+                    
+                    sf.write(str(output_path), audio_np, sample_rate, format=sf_format, subtype=subtype)
+                    logger.debug(f"[AudioSaver] Saved audio to {output_path} ({format}, {sample_rate}Hz) via soundfile")
+                    return str(output_path)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to save {format} via soundfile: {e}")
+                    raise
+                    
             else:
-                # Other formats use default backend
-                torchaudio.save(
-                    str(output_path),
-                    audio_tensor,
-                    sample_rate,
-                    channels_first=True,
-                )
-            
-            logger.debug(f"[AudioSaver] Saved audio to {output_path} ({format}, {sample_rate}Hz)")
-            return str(output_path)
+                # Fallback for unknown formats
+                import soundfile as sf
+                audio_np = audio_tensor.transpose(0, 1).numpy()
+                sf.write(str(output_path), audio_np, sample_rate)
+                logger.debug(f"[AudioSaver] Saved audio to {output_path} ({format}, fallback soundfile, {sample_rate}Hz)")
+                return str(output_path)
             
         except Exception as e:
-            try:
-                import soundfile as sf
-                audio_np = audio_tensor.transpose(0, 1).numpy()  # -> [samples, channels]
-                
-                # Handle wav32 fallback formatting
-                if format == "wav32":
-                    sf_format = "WAV"
-                    subtype = "FLOAT"
-                else:
-                    sf_format = format.upper()
-                    subtype = None
-                    
-                sf.write(str(output_path), audio_np, sample_rate, format=sf_format, subtype=subtype)
-                logger.debug(f"[AudioSaver] Fallback soundfile Saved audio to {output_path} ({format}, {sample_rate}Hz)")
-                return str(output_path)
-            except Exception as inner_e:
-                logger.error(f"[AudioSaver] Failed to save audio: {e} -> Fallback failed: {inner_e}")
-                raise
+            logger.error(f"[AudioSaver] Failed to save audio: {e}")
+            raise
     
     def convert_audio(
         self,

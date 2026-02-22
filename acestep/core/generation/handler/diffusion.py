@@ -69,8 +69,11 @@ class DiffusionMixin:
             if not hasattr(self, required_attr):
                 raise AttributeError(f"DiffusionMixin host is missing required attribute '{required_attr}'")
 
-        if infer_method not in {"ode", "sde"}:
-            raise ValueError(f"Unsupported infer_method '{infer_method}'. Expected 'ode' or 'sde'.")
+        from acestep.core.generation.solvers import VALID_SOLVERS
+        _legacy = {"ode", "sde", "dpmsde"}
+        _all_valid = VALID_SOLVERS | _legacy
+        if infer_method not in _all_valid:
+            raise ValueError(f"Unsupported infer_method '{infer_method}'. Valid: {sorted(_all_valid)}")
 
         if timesteps is not None and not (hasattr(timesteps, "__iter__") or hasattr(timesteps, "tolist")):
             raise TypeError("timesteps must be iterable, tensor-like, or None")

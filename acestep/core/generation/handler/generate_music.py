@@ -43,6 +43,7 @@ class GenerateMusicMixin:
         cover_noise_strength: float = 0.0,
         task_type: str = "text2music",
         use_adg: bool = False,
+        guidance_mode: str = "",
         cfg_interval_start: float = 0.0,
         cfg_interval_end: float = 1.0,
         shift: float = 1.0,
@@ -51,6 +52,15 @@ class GenerateMusicMixin:
         timesteps: Optional[List[float]] = None,
         latent_shift: float = 0.0,
         latent_rescale: float = 1.0,
+        # PAG (Perturbed-Attention Guidance) Parameters
+        use_pag: bool = False,
+        pag_start: float = 0.30,
+        pag_end: float = 0.80,
+        pag_scale: float = 0.2,
+        # Steering Parameters
+        steering_enabled: Optional[bool] = None,
+        steering_loaded: Optional[List[str]] = None,
+        steering_alphas: Optional[Dict[str, float]] = None,
         progress=None,
     ) -> Dict[str, Any]:
         """Generate audio from text/reference inputs and return response payload.
@@ -108,6 +118,23 @@ class GenerateMusicMixin:
         repainting_end = runtime["repainting_end"]
 
         try:
+            # Temporary override of steering configuration if present in GenerationParams
+            prev_steering_enabled = getattr(self, "steering_enabled", False)
+            prev_steering_config = getattr(self, "steering_config", {})
+            
+            has_req_steering = steering_enabled is not None
+            if has_req_steering:
+                self.steering_enabled = steering_enabled
+                temp_config = {}
+                for concept in (steering_loaded or []):
+                    alpha = (steering_alphas or {}).get(concept, 1.0)
+                    temp_config[concept] = {
+                        "alpha": alpha,
+                        "layers": "tf7",
+                        "mode": "cond_only",
+                    }
+                self.steering_config = temp_config
+
             refer_audios, processed_src_audio, audio_error = self._prepare_reference_and_source_audio(
                 reference_audio=reference_audio,
                 src_audio=src_audio,
@@ -146,11 +173,15 @@ class GenerateMusicMixin:
                 actual_seed_list=actual_seed_list,
                 audio_cover_strength=audio_cover_strength,
                 cover_noise_strength=cover_noise_strength,
-                use_adg=use_adg,
+                guidance_mode=guidance_mode if guidance_mode else ("adg" if use_adg else "apg"),
                 cfg_interval_start=cfg_interval_start,
                 cfg_interval_end=cfg_interval_end,
                 shift=shift,
                 infer_method=infer_method,
+                use_pag=use_pag,
+                pag_start=pag_start,
+                pag_end=pag_end,
+                pag_scale=pag_scale,
             )
             outputs = service_run["outputs"]
             infer_steps_for_progress = service_run["infer_steps_for_progress"]
@@ -178,6 +209,7 @@ class GenerateMusicMixin:
                 actual_batch_size=actual_batch_size,
                 progress=progress,
             )
+
         except Exception as exc:
             error_msg = f"Error: {exc!s}\n{traceback.format_exc()}"
             logger.exception("[generate_music] Generation failed")
@@ -188,3 +220,8 @@ class GenerateMusicMixin:
                 "success": False,
                 "error": f"{exc!s}",
             }
+        
+        finally:
+            if has_req_steering:
+                self.steering_enabled = prev_steering_enabled
+                self.steering_config = prev_steering_config

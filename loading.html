@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ACE-Step — Starting Up</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Animated background gradient */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background:
+                radial-gradient(ellipse 80% 60% at 50% 0%, rgba(99, 60, 255, .15), transparent),
+                radial-gradient(ellipse 60% 50% at 80% 100%, rgba(0, 200, 255, .08), transparent),
+                radial-gradient(ellipse 50% 40% at 10% 60%, rgba(255, 60, 170, .06), transparent);
+            animation: shimmer 8s ease-in-out infinite alternate;
+            z-index: 0;
+        }
+
+        @keyframes shimmer {
+            0% {
+                opacity: .6;
+                transform: scale(1);
+            }
+
+            100% {
+                opacity: 1;
+                transform: scale(1.05);
+            }
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            max-width: 520px;
+            padding: 2rem;
+        }
+
+        /* Logo / title */
+        h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a78bfa, #60a5fa, #34d399);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: .35rem;
+            letter-spacing: -.02em;
+        }
+
+        .subtitle {
+            font-size: .85rem;
+            color: #888;
+            margin-bottom: 2rem;
+            font-weight: 400;
+        }
+
+        /* Model selection area */
+        .model-selection {
+            text-align: left;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: rgba(255, 255, 255, .03);
+            border: 1px solid rgba(255, 255, 255, .06);
+            border-radius: 10px;
+        }
+
+        .model-selection h3 {
+            font-size: .75rem;
+            font-weight: 600;
+            color: #a78bfa;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            margin-bottom: .75rem;
+        }
+
+        .model-row {
+            margin-bottom: .65rem;
+        }
+
+        .model-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .model-row label {
+            display: block;
+            font-size: .72rem;
+            color: #888;
+            margin-bottom: .25rem;
+            font-weight: 500;
+        }
+
+        .model-row select {
+            width: 100%;
+            padding: .45rem .6rem;
+            background: rgba(255, 255, 255, .05);
+            border: 1px solid rgba(255, 255, 255, .1);
+            border-radius: 6px;
+            color: #e0e0e8;
+            font-family: 'Inter', sans-serif;
+            font-size: .8rem;
+            outline: none;
+            cursor: pointer;
+            transition: border-color .2s, background .2s;
+        }
+
+        .model-row select:hover {
+            background: rgba(255, 255, 255, .08);
+            border-color: rgba(167, 139, 250, .3);
+        }
+
+        .model-row select:focus {
+            border-color: #a78bfa;
+            background: rgba(255, 255, 255, .08);
+        }
+
+        .model-row select option {
+            background: #1a1a2e;
+            color: #e0e0e8;
+        }
+
+        .auto-continue {
+            font-size: .7rem;
+            color: #666;
+            margin-top: .5rem;
+            text-align: center;
+            transition: opacity .3s;
+        }
+
+        .auto-continue.paused {
+            color: #a78bfa;
+        }
+
+        .env-updated {
+            display: none;
+            font-size: .7rem;
+            color: #34d399;
+            margin-top: .4rem;
+            text-align: center;
+            animation: fadeIn .3s ease;
+        }
+
+        .env-updated.show {
+            display: block;
+        }
+
+        /* Spinner */
+        .spinner-wrap {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 2rem;
+        }
+
+        .spinner {
+            width: 56px;
+            height: 56px;
+            border: 3px solid rgba(167, 139, 250, .15);
+            border-top-color: #a78bfa;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Status checklist */
+        .checks {
+            list-style: none;
+            text-align: left;
+            margin-bottom: 2rem;
+        }
+
+        .checks li {
+            display: flex;
+            align-items: center;
+            gap: .65rem;
+            padding: .55rem 0;
+            font-size: .9rem;
+            color: #777;
+            border-bottom: 1px solid rgba(255, 255, 255, .04);
+            transition: color .3s;
+        }
+
+        .checks li.ok {
+            color: #6ee7b7;
+        }
+
+        .checks li.active {
+            color: #c4b5fd;
+        }
+
+        .icon {
+            width: 22px;
+            height: 22px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            font-size: .75rem;
+            transition: all .3s;
+        }
+
+        .icon.pending {
+            border: 2px solid #444;
+        }
+
+        .icon.running {
+            border: 2px solid #a78bfa;
+            animation: pulse-ring 1.4s ease-in-out infinite;
+        }
+
+        .icon.done {
+            background: #10b981;
+            border: none;
+            color: #fff;
+            font-weight: 700;
+        }
+
+        @keyframes pulse-ring {
+
+            0%,
+            100% {
+                box-shadow: 0 0 0 0 rgba(167, 139, 250, .4);
+            }
+
+            50% {
+                box-shadow: 0 0 0 6px rgba(167, 139, 250, 0);
+            }
+        }
+
+        /* Detail text under each check */
+        .detail {
+            font-size: .72rem;
+            color: #555;
+            margin-left: 2.15rem;
+            margin-top: -.25rem;
+            padding-bottom: .3rem;
+        }
+
+        /* Elapsed time */
+        .elapsed {
+            font-size: .78rem;
+            color: #555;
+            margin-top: 1rem;
+        }
+
+        /* Ready state */
+        .ready-banner {
+            display: none;
+            background: linear-gradient(135deg, rgba(16, 185, 129, .12), rgba(99, 60, 255, .08));
+            border: 1px solid rgba(16, 185, 129, .25);
+            border-radius: 12px;
+            padding: 1.2rem;
+            margin-top: 1.5rem;
+            font-size: .95rem;
+            color: #6ee7b7;
+        }
+
+        .ready-banner.show {
+            display: block;
+            animation: fadeIn .5s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(8px);
+            }
+
+            to {
+                opacity: 1;
+                transform: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>ACE-Step</h1>
+        <p class="subtitle">AI Music Generation Studio</p>
+
+        <!-- Model Selection -->
+        <div class="model-selection" id="modelSelection">
+            <h3>Startup Models</h3>
+            <div class="model-row">
+                <label>ACE-Step Model</label>
+                <select id="modelSelect"></select>
+            </div>
+            <div class="model-row">
+                <label>Language Model (5Hz LM)</label>
+                <select id="lmModelSelect"></select>
+            </div>
+            <div class="auto-continue" id="autoContinue">Auto-continuing in 5s…</div>
+            <div class="env-updated" id="envUpdated">✓ .env updated — will load on startup</div>
+        </div>
+
+        <div class="spinner-wrap" id="spinnerWrap">
+            <div class="spinner"></div>
+        </div>
+
+        <ul class="checks">
+            <li id="s-api">
+                <span class="icon pending" id="i-api"></span>
+                <span>Python API Server <small style="color:#555">(port 8001)</small></span>
+            </li>
+            <li class="detail" id="d-api">Waiting for server to start…</li>
+
+            <li id="s-backend">
+                <span class="icon pending" id="i-backend"></span>
+                <span>Express Backend <small style="color:#555">(port 3001)</small></span>
+            </li>
+
+            <li id="s-frontend">
+                <span class="icon pending" id="i-frontend"></span>
+                <span>Vite Frontend <small style="color:#555" id="frontend-port">(port ...)</small></span>
+            </li>
+        </ul>
+
+        <div class="elapsed" id="elapsed">Starting services…</div>
+
+        <div class="ready-banner" id="readyBanner">
+            ✨ All systems ready — redirecting…
+        </div>
+    </div>
+
+    <!-- Port + model config written by LAUNCH.bat -->
+    <script src="loading-config.js" onerror="window.VITE_PORT='3000'"></script>
+    <script>
+        const start = Date.now();
+        const state = { apiUp: false, apiReady: false, backend: false, frontend: false };
+
+        // Port comes from loading-config.js (written by LAUNCH.bat) or defaults to 3000
+        if (typeof VITE_PORT === 'undefined') var VITE_PORT = '3000';
+        if (typeof AVAILABLE_MODELS === 'undefined') var AVAILABLE_MODELS = [];
+        if (typeof AVAILABLE_LM_MODELS === 'undefined') var AVAILABLE_LM_MODELS = [];
+        if (typeof CURRENT_MODEL === 'undefined') var CURRENT_MODEL = 'acestep-v15-base';
+        if (typeof CURRENT_LM_MODEL === 'undefined') var CURRENT_LM_MODEL = 'acestep-5Hz-lm-0.6B';
+
+        document.getElementById('frontend-port').textContent = `(port ${VITE_PORT})`;
+
+        // ---- Populate dropdowns ----
+        const modelSelect = document.getElementById('modelSelect');
+        const lmModelSelect = document.getElementById('lmModelSelect');
+
+        function populateSelect(selectEl, items, currentValue) {
+            selectEl.innerHTML = '';
+            items.forEach(item => {
+                const opt = document.createElement('option');
+                opt.value = item;
+                opt.textContent = item;
+                if (item === currentValue) opt.selected = true;
+                selectEl.appendChild(opt);
+            });
+            // If current value not in list, add it
+            if (currentValue && !items.includes(currentValue)) {
+                const opt = document.createElement('option');
+                opt.value = currentValue;
+                opt.textContent = currentValue + ' (not found)';
+                opt.selected = true;
+                selectEl.insertBefore(opt, selectEl.firstChild);
+            }
+        }
+
+        populateSelect(modelSelect, AVAILABLE_MODELS, CURRENT_MODEL);
+        populateSelect(lmModelSelect, AVAILABLE_LM_MODELS, CURRENT_LM_MODEL);
+
+        // ---- Auto-continue timer ----
+        const AUTO_CONTINUE_SECONDS = 5;
+        let autoContinueRemaining = AUTO_CONTINUE_SECONDS;
+        let autoContinuePaused = false;
+        let autoContinueDone = false;
+        const autoContinueEl = document.getElementById('autoContinue');
+        const envUpdatedEl = document.getElementById('envUpdated');
+
+        function updateAutoContinueDisplay() {
+            if (autoContinueDone) {
+                autoContinueEl.style.display = 'none';
+                return;
+            }
+            if (autoContinuePaused) {
+                autoContinueEl.textContent = 'Timer paused — saving selection…';
+                autoContinueEl.className = 'auto-continue paused';
+            } else {
+                autoContinueEl.textContent = `Auto-continuing in ${autoContinueRemaining}s…`;
+                autoContinueEl.className = 'auto-continue';
+            }
+        }
+
+        const autoContinueInterval = setInterval(() => {
+            if (autoContinuePaused || autoContinueDone) return;
+            autoContinueRemaining--;
+            if (autoContinueRemaining <= 0) {
+                autoContinueDone = true;
+                clearInterval(autoContinueInterval);
+                document.getElementById('modelSelection').style.display = 'none';
+            }
+            updateAutoContinueDisplay();
+        }, 1000);
+
+        // ---- When user changes a dropdown, update .env via Express ----
+        let pendingUpdate = null; // track in-flight update promise
+        let updateSucceeded = false;
+
+        async function updateEnvViaExpress(configPath, lmModelPath, retries = 10) {
+            for (let attempt = 1; attempt <= retries; attempt++) {
+                try {
+                    autoContinueEl.textContent = `Saving to .env (attempt ${attempt}/${retries})…`;
+                    const resp = await fetch('http://localhost:3001/api/models/update-env', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ACESTEP_CONFIG_PATH: configPath,
+                            ACESTEP_LM_MODEL_PATH: lmModelPath,
+                        }),
+                    });
+                    if (resp.ok) {
+                        updateSucceeded = true;
+                        envUpdatedEl.classList.add('show');
+                        setTimeout(() => envUpdatedEl.classList.remove('show'), 4000);
+                        return true;
+                    }
+                } catch (e) {
+                    console.warn(`[Loading] .env update attempt ${attempt}/${retries} failed:`, e.message);
+                }
+                // Wait 1 s between retries
+                if (attempt < retries) {
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+            }
+            // All retries exhausted
+            autoContinueEl.textContent = '⚠ Could not update .env — Express not ready';
+            autoContinueEl.className = 'auto-continue paused';
+            return false;
+        }
+
+        function handleDropdownChange() {
+            // Pause auto-continue while we save
+            autoContinuePaused = true;
+            updateSucceeded = false;
+            updateAutoContinueDisplay();
+
+            // Start the update (with retries)
+            pendingUpdate = updateEnvViaExpress(modelSelect.value, lmModelSelect.value).then(ok => {
+                pendingUpdate = null;
+                // Resume auto-continue timer regardless of outcome
+                autoContinuePaused = false;
+                autoContinueRemaining = AUTO_CONTINUE_SECONDS;
+                updateAutoContinueDisplay();
+            });
+        }
+
+        modelSelect.addEventListener('change', handleDropdownChange);
+        lmModelSelect.addEventListener('change', handleDropdownChange);
+
+        // ---- Service polling ----
+        function elapsed() {
+            const s = Math.floor((Date.now() - start) / 1000);
+            const m = Math.floor(s / 60);
+            return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+        }
+
+        function setIcon(id, status) {
+            const el = document.getElementById(id);
+            el.className = 'icon ' + status;
+            el.textContent = status === 'done' ? '✓' : '';
+        }
+
+        function setRow(id, status) {
+            const el = document.getElementById(id);
+            el.className = status === 'done' ? 'ok' : (status === 'running' ? 'active' : '');
+        }
+
+        function setDetail(id, text) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        }
+
+        // Probe with no-cors (just checks if server responds at all)
+        async function probeNoCors(url, timeout = 2000) {
+            try {
+                const c = new AbortController();
+                const t = setTimeout(() => c.abort(), timeout);
+                await fetch(url, { signal: c.signal, mode: 'no-cors' });
+                clearTimeout(t);
+                return true;
+            } catch { return false; }
+        }
+
+        // Probe the Python API's /v1/models/status to check if models are loaded
+        async function probeApiReady(timeout = 3000) {
+            try {
+                const c = new AbortController();
+                const t = setTimeout(() => c.abort(), timeout);
+                const r = await fetch('http://localhost:8001/v1/models/status', {
+                    signal: c.signal,
+                    headers: { 'Accept': 'application/json' },
+                });
+                clearTimeout(t);
+                if (!r.ok) return { up: true, ready: false, model: null, lmModel: null };
+                const json = await r.json();
+                const data = json.data || json;
+                const activeModel = data.active_model || null;
+                const lmModel = data.lm_model || null;
+                return { up: true, ready: !!activeModel, model: activeModel, lmModel: lmModel };
+            } catch {
+                return { up: false, ready: false, model: null, lmModel: null };
+            }
+        }
+
+        async function poll() {
+            // ---- Python API: two-phase check (HTTP up → models loaded) ----
+            if (!state.apiReady) {
+                setIcon('i-api', 'running'); setRow('s-api', 'running');
+                const result = await probeApiReady();
+
+                if (result.up && !result.ready) {
+                    state.apiUp = true;
+                    setDetail('d-api', 'Server is up — loading models into VRAM…');
+                    // Hide model selection once Python is loading (too late to change)
+                    if (!autoContinueDone) {
+                        autoContinueDone = true;
+                        clearInterval(autoContinueInterval);
+                        document.getElementById('modelSelection').style.display = 'none';
+                    }
+                } else if (result.ready) {
+                    state.apiUp = true;
+                    state.apiReady = true;
+                    const modelInfo = result.model + (result.lmModel ? ` | LM: ${result.lmModel}` : '');
+                    setDetail('d-api', `Model loaded: ${modelInfo}`);
+                    // Hide model selection
+                    if (!autoContinueDone) {
+                        autoContinueDone = true;
+                        clearInterval(autoContinueInterval);
+                        document.getElementById('modelSelection').style.display = 'none';
+                    }
+                } else {
+                    setDetail('d-api', 'Waiting for server to start…');
+                }
+            }
+            if (state.apiReady) { setIcon('i-api', 'done'); setRow('s-api', 'done'); }
+
+            // ---- Express backend ----
+            if (!state.backend) {
+                setIcon('i-backend', 'running'); setRow('s-backend', 'running');
+                state.backend = await probeNoCors('http://localhost:3001/health');
+            }
+            if (state.backend) { setIcon('i-backend', 'done'); setRow('s-backend', 'done'); }
+
+            // ---- Vite frontend ----
+            if (!state.frontend) {
+                setIcon('i-frontend', 'running'); setRow('s-frontend', 'running');
+                state.frontend = await probeNoCors(`http://localhost:${VITE_PORT}`);
+            }
+            if (state.frontend) { setIcon('i-frontend', 'done'); setRow('s-frontend', 'done'); }
+
+            document.getElementById('elapsed').textContent = `Elapsed: ${elapsed()}`;
+
+            if (state.apiReady && state.backend && state.frontend) {
+                document.getElementById('spinnerWrap').style.display = 'none';
+                document.getElementById('readyBanner').classList.add('show');
+                document.getElementById('elapsed').textContent = `All ready in ${elapsed()} — redirecting…`;
+                setTimeout(() => { window.location.href = `http://localhost:${VITE_PORT}`; }, 1500);
+            } else {
+                setTimeout(poll, 2500);
+            }
+        }
+
+        poll();
+    </script>
+</body>
+
+</html>

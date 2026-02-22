@@ -38,6 +38,7 @@ except ImportError:
 from acestep.training.configs import LoRAConfig, LoKRConfig, TrainingConfig
 from acestep.training.lora_utils import (
     inject_lora_into_dit,
+    load_lora_training_weights,
     save_lora_weights,
     save_training_checkpoint,
     load_training_checkpoint,
@@ -56,6 +57,9 @@ from acestep.training.path_safety import safe_path
 # Turbo model shift=3.0 discrete timesteps (8 steps, same as inference)
 TURBO_SHIFT3_TIMESTEPS = [1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3]
 
+# Cache for the timesteps tensor to avoid re-creating it every training step
+_TIMESTEPS_CACHE: Dict[Tuple[torch.device, torch.dtype], torch.Tensor] = {}
+
 
 def _normalize_device_type(device: Any) -> str:
     """Normalize torch device or string to canonical device type."""
@@ -64,6 +68,24 @@ def _normalize_device_type(device: Any) -> str:
     if isinstance(device, str):
         return device.split(":", 1)[0]
     return str(device)
+
+
+def _maybe_enable_gradient_checkpointing(module: Any) -> bool:
+    target = module
+    if hasattr(target, "get_base_model"):
+        try:
+            target = target.get_base_model()
+        except Exception:
+            target = module
+
+    if not hasattr(target, "gradient_checkpointing_enable"):
+        return False
+
+    try:
+        target.gradient_checkpointing_enable()
+    except Exception:
+        return False
+    return True
 
 
 def _select_compute_dtype(device_type: str) -> torch.dtype:
@@ -113,6 +135,26 @@ def _count_nonfinite_grads(params: List[torch.nn.Parameter]) -> Tuple[int, int]:
         if not torch.isfinite(g).all():
             nonfinite += 1
     return nonfinite, total_with_grad
+
+
+def _accumulate_loss_without_sync(
+    accumulated_loss: Any,
+    loss: torch.Tensor,
+) -> torch.Tensor:
+    """Accumulate detached loss tensors without forcing host-device sync.
+
+    Args:
+        accumulated_loss: Running accumulator (float sentinel or tensor).
+        loss: Current micro-batch loss tensor.
+
+    Returns:
+        Updated detached tensor accumulator.
+    """
+    loss_detached = loss.detach()
+    if isinstance(accumulated_loss, torch.Tensor):
+        accumulated_loss.add_(loss_detached)
+        return accumulated_loss
+    return loss_detached
 
 
 def _ensure_optimizer_params_fp32(optimizer: torch.optim.Optimizer) -> Tuple[int, int]:
@@ -251,7 +293,10 @@ def _iter_module_wrappers(module: nn.Module) -> List[nn.Module]:
     return modules
 
 
-def _configure_training_memory_features(decoder: nn.Module) -> Tuple[bool, bool, bool]:
+def _configure_training_memory_features(
+    decoder: nn.Module,
+    enable_gradient_checkpointing: bool,
+) -> Tuple[bool, bool, bool]:
     """
     Enable gradient checkpointing and disable use_cache across wrapped decoder modules.
 
@@ -263,22 +308,16 @@ def _configure_training_memory_features(decoder: nn.Module) -> Tuple[bool, bool,
     input_grads_enabled = False
 
     for mod in _iter_module_wrappers(decoder):
-        if hasattr(mod, "gradient_checkpointing_enable"):
+        if enable_gradient_checkpointing:
             try:
-                mod.gradient_checkpointing_enable()
-                checkpointing_enabled = True
-            except Exception:
-                pass
-        elif hasattr(mod, "gradient_checkpointing"):
-            try:
-                mod.gradient_checkpointing = True
-                checkpointing_enabled = True
+                if _maybe_enable_gradient_checkpointing(mod):
+                    checkpointing_enabled = True
             except Exception:
                 pass
 
         # PEFT + gradient checkpointing can require input embeddings to have
         # gradients enabled, otherwise loss may be detached (no grad_fn).
-        if hasattr(mod, "enable_input_require_grads"):
+        if enable_gradient_checkpointing and checkpointing_enabled and hasattr(mod, "enable_input_require_grads"):
             try:
                 mod.enable_input_require_grads()
                 hook_enabled = bool(getattr(mod, "_acestep_input_grads_hook_enabled", False))
@@ -302,41 +341,40 @@ def _configure_training_memory_features(decoder: nn.Module) -> Tuple[bool, bool,
 
 def sample_discrete_timestep(bsz, timesteps_tensor):
     """Sample timesteps from discrete turbo shift=3 schedule.
-    
+
     For each sample in the batch, randomly select one of the 8 discrete timesteps
     used by the turbo model with shift=3.0.
-    
+
     Args:
         bsz: Batch size
         device: Device
         dtype: Data type (should be bfloat16)
-        
+
     Returns:
         Tuple of (t, r) where both are the same sampled timestep
     """
     # Randomly select indices for each sample in batch
     indices = torch.randint(0, timesteps_tensor.shape[0], (bsz,), device=timesteps_tensor.device)
     t = timesteps_tensor[indices]
-    
     # r = t for this training setup
     r = t
-    
+
     return t, r
 
 
 class PreprocessedLoRAModule(nn.Module):
     """LoRA Training Module using preprocessed tensors.
-    
+
     This module trains only the DiT decoder with LoRA adapters.
     All inputs are pre-computed tensors - no VAE or text encoder needed!
-    
+
     Training flow:
     1. Load pre-computed tensors (target_latents, encoder_hidden_states, context_latents)
     2. Sample noise and timestep
     3. Forward through decoder (with LoRA)
     4. Compute flow matching loss
     """
-    
+
     def __init__(
         self,
         model: nn.Module,
@@ -346,7 +384,7 @@ class PreprocessedLoRAModule(nn.Module):
         dtype: torch.dtype,
     ):
         """Initialize the training module.
-        
+
         Args:
             model: The AceStepConditionGenerationModel
             lora_config: LoRA configuration
@@ -355,24 +393,62 @@ class PreprocessedLoRAModule(nn.Module):
             dtype: Data type to use
         """
         super().__init__()
-        
+
         self.lora_config = lora_config
         self.training_config = training_config
         self.device = torch.device(device) if isinstance(device, str) else device
         self.device_type = _normalize_device_type(self.device)
-        self.dtype = _select_compute_dtype(self.device_type)
+        self.dtype = dtype
         self.transfer_non_blocking = self.device_type in ("cuda", "xpu")
         self.timesteps_tensor = torch.tensor(TURBO_SHIFT3_TIMESTEPS, device=self.device, dtype=self.dtype)
+
+        self.fp8_enabled = False
+        self.fp8_error = None
+
+        # FP8 conversion MUST happen BEFORE LoRA injection.
+        # convert_to_float8_training operates on a parent module, replacing its
+        # child nn.Linear layers with Float8Linear in-place.  After PEFT wraps
+        # the Linear layers into lora.Linear wrappers they are no longer direct
+        # nn.Linear instances, so the conversion would find nothing to convert.
+        if self.training_config.use_fp8:
+            try:
+                try:
+                    from torchao.float8 import convert_to_float8_training  # type: ignore
+                except ImportError:
+                    from torchao.float8.float8_linear_utils import convert_to_float8_training  # type: ignore
+
+                convert_to_float8_training(model.decoder)
+
+                float8_count = sum(
+                    1 for m in model.decoder.modules()
+                    if "Float8" in m.__class__.__name__
+                )
+                self.fp8_enabled = float8_count > 0
+                if self.fp8_enabled:
+                    logger.info(f"FP8: converted {float8_count} Linear layers to Float8Linear")
+                else:
+                    self.fp8_error = "convert_to_float8_training ran but no Float8 modules found"
+                    logger.warning(self.fp8_error)
+            except ImportError:
+                self.fp8_enabled = False
+                self.fp8_error = "torchao float8 not available"
+                logger.warning(f"FP8 requested but {self.fp8_error}")
+            except Exception as e:
+                self.fp8_enabled = False
+                self.fp8_error = str(e)
+                logger.warning(f"FP8 conversion failed: {self.fp8_error}")
+
+        # Inject LoRA into the decoder only (after FP8 so PEFT wraps Float8Linear layers)
         # When gradient checkpointing is enabled via wrapper layers that don't expose
         # enable_input_require_grads(), force at least one forward input to require grad
         # so checkpointed segments keep a valid autograd graph.
         self.force_input_grads_for_checkpointing = False
-        
+
         # Inject LoRA into the decoder only
         if check_peft_available():
             # Fix: Force tensors out of inference mode before injection
             for param in model.parameters():
-                param.data = param.data.clone() 
+                param.data = param.data.clone()
                 if param.is_inference():
                     with torch.no_grad():
                         param.data = param.data.clone()
@@ -383,30 +459,48 @@ class PreprocessedLoRAModule(nn.Module):
             self.model = model
             self.lora_info = {}
             logger.warning("PEFT not available, training without LoRA adapters")
-            
-        # Added Torch Compile Logic
-        if hasattr(torch, "compile") and self.device_type == "cuda":
-            logger.info("Compiling DiT decoder...")
-            self.model.decoder = torch.compile(self.model.decoder, mode="default") # 'default' is more stable for LoRA
-            logger.info("torch.compile successful")
+
+        if self.training_config.gradient_checkpointing:
+            if _maybe_enable_gradient_checkpointing(self.model.decoder):
+                logger.info("Gradient checkpointing enabled for decoder")
+            else:
+                logger.warning("Gradient checkpointing requested but could not be enabled for decoder")
+
+
+        # torch.compile: optional perf optimization.
+        # PEFT LoRA wraps the decoder in PeftModelForFeatureExtraction which is
+        # incompatible with torch.compile/inductor on PyTorch 2.7.x
+        # (AssertionError at first forward pass, not at compile time).
+        # Only compile when NOT using PEFT adapters.
+        has_peft = bool(self.lora_info)
+        if hasattr(torch, "compile") and self.device_type == "cuda" and not has_peft:
+            try:
+                logger.info("Compiling DiT decoder...")
+                self.model.decoder = torch.compile(self.model.decoder, mode="default")
+                logger.info("torch.compile successful")
+            except Exception as e:
+                logger.warning(f"torch.compile failed ({e}), continuing without compilation")
         else:
-            logger.warning("torch.compile is not available on this PyTorch version.")
-        
+            if has_peft:
+                logger.info("Skipping torch.compile (incompatible with PEFT LoRA adapters)")
+            else:
+                logger.info("torch.compile not available on this device/PyTorch version, skipping")
+
         # Model config for flow matching
         self.config = model.config
-        
+
         # Store training losses
         self.training_losses = []
-    
+
     def training_step(
         self,
         batch: Dict[str, torch.Tensor],
         record_loss: bool = True,
     ) -> torch.Tensor:
         """Single training step using preprocessed tensors.
-        
+
         Note: This is a distilled turbo model, NO CFG is used.
-        
+
         Args:
             batch: Dictionary containing pre-computed tensors:
                 - target_latents: [B, T, 64] - VAE encoded audio
@@ -415,7 +509,7 @@ class PreprocessedLoRAModule(nn.Module):
                 - encoder_attention_mask: [B, L] - Condition mask
                 - context_latents: [B, T, 128] - Source context
             record_loss: If True, append loss to training_losses (set False for validation).
-            
+
         Returns:
             Loss tensor (float32 for stable backward)
         """
@@ -425,38 +519,73 @@ class PreprocessedLoRAModule(nn.Module):
         else:
             autocast_ctx = nullcontext()
         with autocast_ctx:
-            # Get tensors from batch (already on device from Fabric dataloader)
-            target_latents = batch["target_latents"].to(
-                self.device, dtype=self.dtype, non_blocking=self.transfer_non_blocking
-            )  # x0
-            attention_mask = batch["attention_mask"].to(
-                self.device, dtype=self.dtype, non_blocking=self.transfer_non_blocking
-            )
-            encoder_hidden_states = batch["encoder_hidden_states"].to(
-                self.device, dtype=self.dtype, non_blocking=self.transfer_non_blocking
-            )
-            encoder_attention_mask = batch["encoder_attention_mask"].to(
-                self.device, dtype=self.dtype, non_blocking=self.transfer_non_blocking
-            )
-            context_latents = batch["context_latents"].to(
-                self.device, dtype=self.dtype, non_blocking=self.transfer_non_blocking
-            )
-            
+            def _to_dev(x: torch.Tensor) -> torch.Tensor:
+                if x.device == self.device and x.dtype == self.dtype:
+                    return x
+                if x.device.type == self.device.type and (self.device.index is None or x.device.index == self.device.index) and x.dtype == self.dtype:
+                    return x
+                return x.to(self.device, dtype=self.dtype, non_blocking=self.transfer_non_blocking)
+
+            target_latents = _to_dev(batch["target_latents"])  # x0
+            attention_mask = _to_dev(batch["attention_mask"])
+            encoder_hidden_states = _to_dev(batch["encoder_hidden_states"])
+            encoder_attention_mask = _to_dev(batch["encoder_attention_mask"])
+            context_latents = _to_dev(batch["context_latents"])
+
+            loss_attention_mask = attention_mask
+
+            if self.fp8_enabled:
+                multiple = 16
+
+                def _pad_len(n: int) -> int:
+                    r = n % multiple
+                    return 0 if r == 0 else (multiple - r)
+
+                def _pad_3d(x: torch.Tensor, pad_t: int) -> torch.Tensor:
+                    if pad_t <= 0:
+                        return x
+                    out = x.new_zeros((x.shape[0], x.shape[1] + pad_t, x.shape[2]))
+                    out[:, : x.shape[1], :] = x
+                    return out
+
+                def _pad_2d(x: torch.Tensor, pad_t: int) -> torch.Tensor:
+                    if pad_t <= 0:
+                        return x
+                    out = x.new_zeros((x.shape[0], x.shape[1] + pad_t))
+                    out[:, : x.shape[1]] = x
+                    return out
+
+                pad_t = _pad_len(int(target_latents.shape[1]))
+                target_latents = _pad_3d(target_latents, pad_t)
+                loss_attention_mask = _pad_2d(loss_attention_mask, pad_t)
+                context_latents = _pad_3d(context_latents, pad_t)
+
+                attention_mask = loss_attention_mask
+                if pad_t > 0:
+                    attention_mask = attention_mask.clone()
+                    attention_mask[:, -pad_t:] = 1
+
+                pad_l = _pad_len(int(encoder_hidden_states.shape[1]))
+                encoder_hidden_states = _pad_3d(encoder_hidden_states, pad_l)
+                encoder_attention_mask = _pad_2d(encoder_attention_mask, pad_l)
+                if pad_l > 0:
+                    encoder_attention_mask = encoder_attention_mask.clone()
+                    encoder_attention_mask[:, -pad_l:] = 1
             bsz = target_latents.shape[0]
-            
+
             # Flow matching: sample noise x1 and interpolate with data x0
             x1 = torch.randn_like(target_latents)  # Noise
             x0 = target_latents  # Data
-            
+
             # Sample timesteps from discrete turbo shift=3 schedule (8 steps)
             t, r = sample_discrete_timestep(bsz, self.timesteps_tensor)
             t_ = t.unsqueeze(-1).unsqueeze(-1)
-            
+
             # Interpolate: x_t = t * x1 + (1 - t) * x0
             xt = t_ * x1 + (1.0 - t_) * x0
             if self.force_input_grads_for_checkpointing:
                 xt = xt.requires_grad_(True)
-            
+
             # Forward through decoder (distilled turbo model, no CFG)
             decoder_outputs = self.model.decoder(
                 hidden_states=xt,
@@ -467,27 +596,35 @@ class PreprocessedLoRAModule(nn.Module):
                 encoder_attention_mask=encoder_attention_mask,
                 context_latents=context_latents,
             )
-            
+
             # Flow matching loss: predict the flow field v = x1 - x0
-            flow = x1 - x0
-            diffusion_loss = F.mse_loss(decoder_outputs[0], flow)
-        
+            x1.sub_(x0)
+            flow = x1
+
+            if self.fp8_enabled:
+                valid = loss_attention_mask
+                if valid.dtype != torch.bool:
+                    valid = valid != 0
+                valid3 = valid.unsqueeze(-1)
+                diff = (decoder_outputs[0] - flow) ** 2
+                denom = valid3.sum().clamp(min=1)
+                diffusion_loss = (diff * valid3).sum() / denom
+            else:
+                diffusion_loss = F.mse_loss(decoder_outputs[0], flow)
+
         # Convert loss to float32 for stable backward pass
         diffusion_loss = diffusion_loss.float()
-        
-        if record_loss:
-            self.training_losses.append(diffusion_loss.item())
-        
+
         return diffusion_loss
 
 
 class LoRATrainer:
     """High-level trainer for ACE-Step LoRA fine-tuning.
-    
+
     Uses Lightning Fabric for distributed training and mixed precision.
     Supports training from preprocessed tensor directories.
     """
-    
+
     def __init__(
         self,
         dit_handler,
@@ -495,7 +632,7 @@ class LoRATrainer:
         training_config: TrainingConfig,
     ):
         """Initialize the trainer.
-        
+
         Args:
             dit_handler: Initialized DiT handler (for model access)
             lora_config: LoRA configuration
@@ -506,11 +643,11 @@ class LoRATrainer:
         # Validate output_dir early so all downstream path operations are safe
         training_config.output_dir = safe_path(training_config.output_dir)
         self.training_config = training_config
-        
+
         self.module = None
         self.fabric = None
         self.is_training = False
-    
+
     def train_from_preprocessed(
         self,
         tensor_dir: str,
@@ -530,7 +667,7 @@ class LoRATrainer:
             Tuples of (step, loss, status_message)
         """
         self.is_training = True
-        
+
         try:
             # LoRA injection via PEFT is incompatible with torchao-quantized
             # decoder modules in this runtime. Fail fast with actionable guidance.
@@ -552,7 +689,7 @@ class LoRATrainer:
             if not os.path.isdir(tensor_dir):
                 yield 0, 0.0, f"❌ Tensor directory not found: {tensor_dir}"
                 return
-            
+
             # Create training module
             torch.manual_seed(self.training_config.seed)
             random.seed(self.training_config.seed)
@@ -571,7 +708,19 @@ class LoRATrainer:
                 device=self.dit_handler.device,
                 dtype=self.dit_handler.dtype,
             )
-            ckpt_enabled, cache_disabled, input_grads_enabled = _configure_training_memory_features(self.module.model.decoder)
+            # Load previously trained weights if specified
+            if self.training_config.network_weights:
+                try:
+                    info = load_lora_training_weights(self.module.model, self.training_config.network_weights)
+                    yield 0, 0.0, f"📥 Loaded network weights: {info}"
+                except Exception as exc:
+                    yield 0, 0.0, f"❌ Failed to load network weights: {exc}"
+                    return
+
+            ckpt_enabled, cache_disabled, input_grads_enabled = _configure_training_memory_features(
+                self.module.model.decoder,
+                enable_gradient_checkpointing=bool(self.training_config.gradient_checkpointing),
+            )
             # DiT decoder does not expose token embeddings like causal LMs.
             # Force grad-carrying inputs for checkpointed segments to avoid
             # detached losses regardless of wrapper hook availability.
@@ -580,7 +729,7 @@ class LoRATrainer:
                 f"Training memory features: gradient_checkpointing={ckpt_enabled}, "
                 f"use_cache_disabled={cache_disabled}, input_grads_enabled={input_grads_enabled}"
             )
-            
+
             # Create data module
             data_module = PreprocessedDataModule(
                 tensor_dir=tensor_dir,
@@ -590,16 +739,17 @@ class LoRATrainer:
                 prefetch_factor=self.training_config.prefetch_factor,
                 persistent_workers=self.training_config.persistent_workers,
                 pin_memory_device=self.training_config.pin_memory_device,
+                sample_cache_size=getattr(self.training_config, "sample_cache_size", 0),
                 val_split=getattr(self.training_config, "val_split", 0.0),
             )
-            
+
             # Setup data
             data_module.setup('fit')
-            
+
             if len(data_module.train_dataset) == 0:
                 yield 0, 0.0, "❌ No valid samples found in tensor directory"
                 return
-            
+
             yield 0, 0.0, f"📂 Loaded {len(data_module.train_dataset)} preprocessed samples"
             if ckpt_enabled:
                 yield 0, 0.0, "🧠 Gradient checkpointing enabled for decoder"
@@ -612,13 +762,13 @@ class LoRATrainer:
                 yield from self._train_with_fabric(data_module, training_state, resume_from)
             else:
                 yield from self._train_basic(data_module, training_state)
-                
+
         except Exception as e:
             logger.exception("Training failed")
             yield 0, 0.0, f"❌ Training failed: {str(e)}"
         finally:
             self.is_training = False
-    
+
     def _train_with_fabric(
         self,
         data_module: PreprocessedDataModule,
@@ -628,11 +778,11 @@ class LoRATrainer:
         """Train using Lightning Fabric."""
         # Create output directory
         os.makedirs(self.training_config.output_dir, exist_ok=True)
-        
+
         device_type = self.module.device_type
         precision = _select_fabric_precision(device_type)
         accelerator = device_type if device_type in ("cuda", "xpu", "mps", "cpu") else "auto"
-        
+
         # Create TensorBoard logger when available; continue without it otherwise.
         tb_logger = None
         try:
@@ -642,7 +792,7 @@ class LoRATrainer:
             )
         except ModuleNotFoundError as e:
             logger.warning(f"TensorBoard logger unavailable, continuing without logger: {e}")
-        
+
         # Initialize Fabric
         fabric_kwargs = {
             "accelerator": accelerator,
@@ -653,13 +803,22 @@ class LoRATrainer:
             fabric_kwargs["loggers"] = [tb_logger]
         self.fabric = Fabric(**fabric_kwargs)
         self.fabric.launch()
-        
         yield 0, 0.0, f"🚀 Starting training (device: {device_type}, precision: {precision})..."
-        
-        # Keep decoder weights in a stable dtype before optimizer/Fabric setup.
-        # MPS stays in fp32 weights for stability; computation still uses fp16
-        # autocast inside training_step.
-        if device_type == "mps" or precision.endswith("-mixed"):
+
+        if self.training_config.use_fp8:
+            if getattr(self.module, "fp8_enabled", False):
+                yield 0, 0.0, "✅ FP8 training enabled (torchao float8)"
+            else:
+                err = getattr(self.module, "fp8_error", None)
+                if err:
+                    yield 0, 0.0, f"⚠️ FP8 requested but unavailable ({err}), using bf16"
+                else:
+                    yield 0, 0.0, "⚠️ FP8 requested but unavailable, using bf16"
+
+        # Keep frozen weights in compute dtype (bf16/fp16) for memory efficiency.
+        # Only trainable (LoRA) parameters are promoted to fp32 for optimizer stability.
+        # MPS uses fp32 weights throughout for numerical stability.
+        if device_type == "mps":
             self.module.model.decoder = self.module.model.decoder.to(dtype=torch.float32)
         else:
             self.module.model.decoder = self.module.model.decoder.to(dtype=self.module.dtype)
@@ -686,18 +845,17 @@ class LoRATrainer:
 
         # Setup optimizer - only LoRA parameters
         trainable_params = [p for p in self.module.model.parameters() if p.requires_grad]
-        
+
         if not trainable_params:
             yield 0, 0.0, "❌ No trainable parameters found!"
             return
-        
+
         yield 0, 0.0, f"🎯 Training {sum(p.numel() for p in trainable_params):,} parameters"
-        
+
         optimizer_kwargs = {
             "lr": self.training_config.learning_rate,
             "weight_decay": self.training_config.weight_decay,
         }
-
         # Optimizer selection: AdamW 8-bit vs Standard AdamW
         if HAS_BNB and device_type == "cuda":
             logger.info("train_with_fabric using bitsandbytes 8-bit AdamW optimizer")
@@ -706,12 +864,11 @@ class LoRATrainer:
             if self.module.device.type == "cuda":
                 optimizer_kwargs["fused"] = True
             optimizer = AdamW(trainable_params, **optimizer_kwargs)
-        
         # Calculate total steps
         steps_per_epoch = max(1, math.ceil(len(train_loader) / self.training_config.gradient_accumulation_steps))
         total_steps = steps_per_epoch * self.training_config.max_epochs
         warmup_steps = min(self.training_config.warmup_steps, max(1, total_steps // 10))
-        
+
         # Scheduler
         warmup_scheduler = LinearLR(
             optimizer,
@@ -719,27 +876,30 @@ class LoRATrainer:
             end_factor=1.0,
             total_iters=warmup_steps,
         )
-        
+
         main_scheduler = CosineAnnealingWarmRestarts(
             optimizer,
             T_0=max(1, total_steps - warmup_steps),
             T_mult=1,
             eta_min=self.training_config.learning_rate * 0.01,
         )
-        
+
         scheduler = SequentialLR(
             optimizer,
             schedulers=[warmup_scheduler, main_scheduler],
             milestones=[warmup_steps],
         )
-        
+
         # Setup with Fabric - only the decoder (which has LoRA)
         self.module.model.decoder, optimizer = self.fabric.setup(self.module.model.decoder, optimizer)
         casted_opt_params, total_opt_params = _ensure_optimizer_params_fp32(optimizer)
         logger.info(
             f"Optimizer param dtype fixup: casted {casted_opt_params}/{total_opt_params} to fp32"
         )
-        train_loader = self.fabric.setup_dataloaders(train_loader)
+        try:
+            train_loader = self.fabric.setup_dataloaders(train_loader, move_to_device=False)
+        except TypeError:
+            train_loader = self.fabric.setup_dataloaders(train_loader)
 
         # Handle resume from checkpoint (load AFTER Fabric setup)
         start_epoch = 0
@@ -818,22 +978,30 @@ class LoRATrainer:
             epoch_loss = 0.0
             num_updates = 0
             epoch_start_time = time.time()
-            
+
             for batch_idx, batch in enumerate(train_loader):
                 # Check for stop signal
                 if training_state and training_state.get("should_stop", False):
-                    yield global_step, accumulated_loss / max(accumulation_step, 1), "⏹️ Training stopped by user"
+                    _stop_loss = accumulated_loss.item() / max(accumulation_step, 1) if isinstance(accumulated_loss, torch.Tensor) else accumulated_loss / max(accumulation_step, 1)
+                    yield global_step, _stop_loss, "Training stopped by user"
                     return
-                
+
                 # Forward pass
                 loss = self.module.training_step(batch)
                 loss = loss / self.training_config.gradient_accumulation_steps
-                
+
                 # Backward pass
                 self.fabric.backward(loss)
-                accumulated_loss += loss.item()
+                # Accumulate loss as a detached tensor to avoid CPU-GPU sync on
+                # every micro-batch.  We only call .item() at the optimizer step
+                # boundary when we actually need the scalar for logging.
+                loss_detached = loss.detach()
+                if isinstance(accumulated_loss, torch.Tensor):
+                    accumulated_loss.add_(loss_detached)
+                else:
+                    accumulated_loss = loss_detached
                 accumulation_step += 1
-                
+
                 # Optimizer step
                 if accumulation_step >= self.training_config.gradient_accumulation_steps:
                     nonfinite_grads, grad_tensors = _count_nonfinite_grads(trainable_params)
@@ -853,15 +1021,13 @@ class LoRATrainer:
                         max_norm=self.training_config.max_grad_norm,
                         error_if_nonfinite=False,
                     )
-                    
+
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
-                    
                     global_step += 1
-                    
-                    # Log
-                    avg_loss = accumulated_loss / accumulation_step
+                    avg_loss = accumulated_loss.item() / accumulation_step
+                    self.module.training_losses.append(float(avg_loss))
                     if global_step % self.training_config.log_every_n_steps == 0:
                         if training_state is not None:
                             if ema_loss is None:
@@ -874,7 +1040,7 @@ class LoRATrainer:
                         self.fabric.log("train/loss", avg_loss, step=global_step)
                         self.fabric.log("train/lr", scheduler.get_last_lr()[0], step=global_step)
                         yield global_step, avg_loss, f"Epoch {epoch+1}/{self.training_config.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}"
-                    
+
                     epoch_loss += avg_loss
                     num_updates += 1
                     accumulated_loss = 0.0
@@ -905,7 +1071,8 @@ class LoRATrainer:
                     optimizer.zero_grad(set_to_none=True)
 
                 global_step += 1
-                avg_loss = accumulated_loss / accumulation_step
+                avg_loss = accumulated_loss.item() / accumulation_step
+                self.module.training_losses.append(float(avg_loss))
                 if global_step % self.training_config.log_every_n_steps == 0:
                     if training_state is not None:
                         if ema_loss is None:
@@ -923,7 +1090,7 @@ class LoRATrainer:
                     num_updates += 1
                     accumulated_loss = 0.0
                     accumulation_step = 0
-            
+
             # End of epoch
             epoch_time = time.time() - epoch_start_time
             avg_epoch_loss = epoch_loss / max(num_updates, 1)
@@ -970,7 +1137,7 @@ class LoRATrainer:
                         global_step,
                         best_dir,
                     )
-            
+
             # Save checkpoint
             if (epoch + 1) % self.training_config.save_every_n_epochs == 0:
                 checkpoint_dir = os.path.join(self.training_config.output_dir, "checkpoints", f"epoch_{epoch+1}")
@@ -987,10 +1154,10 @@ class LoRATrainer:
         # Save final model
         final_path = os.path.join(self.training_config.output_dir, "final")
         save_lora_weights(self.module.model, final_path)
-        
+
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
         yield global_step, final_loss, f"✅ Training complete! LoRA saved to {final_path}"
-    
+
     def _train_basic(
         self,
         data_module: PreprocessedDataModule,
@@ -998,17 +1165,17 @@ class LoRATrainer:
     ) -> Generator[Tuple[int, float, str], None, None]:
         """Basic training loop without Fabric."""
         yield 0, 0.0, "🚀 Starting basic training loop..."
-        
+
         os.makedirs(self.training_config.output_dir, exist_ok=True)
-        
+
         train_loader = data_module.train_dataloader()
-        
+
         trainable_params = [p for p in self.module.model.parameters() if p.requires_grad]
-        
+
         if not trainable_params:
             yield 0, 0.0, "❌ No trainable parameters found!"
             return
-        
+
         if HAS_BNB and self.module.device_type == "cuda":
             optimizer = bnb.optim.AdamW8bit(
                 trainable_params,
@@ -1022,49 +1189,53 @@ class LoRATrainer:
                 lr=self.training_config.learning_rate,
                 weight_decay=self.training_config.weight_decay,
             )
-        
+
         steps_per_epoch = max(1, math.ceil(len(train_loader) / self.training_config.gradient_accumulation_steps))
         total_steps = steps_per_epoch * self.training_config.max_epochs
         warmup_steps = min(self.training_config.warmup_steps, max(1, total_steps // 10))
-        
+
         warmup_scheduler = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps)
         main_scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=max(1, total_steps - warmup_steps), T_mult=1, eta_min=self.training_config.learning_rate * 0.01)
         scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_steps])
-        
+
         global_step = 0
         accumulation_step = 0
         accumulated_loss = 0.0
         optimizer.zero_grad(set_to_none=True)
-        
         self.module.model.decoder.train()
-        
+
         for epoch in range(self.training_config.max_epochs):
             epoch_loss = 0.0
             num_updates = 0
             epoch_start_time = time.time()
-            
+
             for batch in train_loader:
                 if training_state and training_state.get("should_stop", False):
-                    yield global_step, accumulated_loss / max(accumulation_step, 1), "⏹️ Training stopped"
+                    _stop_loss = accumulated_loss.item() / max(accumulation_step, 1) if isinstance(accumulated_loss, torch.Tensor) else accumulated_loss / max(accumulation_step, 1)
+                    yield global_step, _stop_loss, "Training stopped"
                     return
-                
+
                 loss = self.module.training_step(batch)
                 loss = loss / self.training_config.gradient_accumulation_steps
                 loss.backward()
-                accumulated_loss += loss.item()
+                loss_detached = loss.detach()
+                if isinstance(accumulated_loss, torch.Tensor):
+                    accumulated_loss.add_(loss_detached)
+                else:
+                    accumulated_loss = loss_detached
                 accumulation_step += 1
-                
+
                 if accumulation_step >= self.training_config.gradient_accumulation_steps:
                     torch.nn.utils.clip_grad_norm_(trainable_params, self.training_config.max_grad_norm)
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
-                    
-                    avg_loss = accumulated_loss / accumulation_step
+                    avg_loss = accumulated_loss.item() / accumulation_step
+                    self.module.training_losses.append(float(avg_loss))
                     if global_step % self.training_config.log_every_n_steps == 0:
                         yield global_step, avg_loss, f"Epoch {epoch+1}, Step {global_step}, Loss: {avg_loss:.4f}"
-                    
+
                     epoch_loss += avg_loss
                     num_updates += 1
                     accumulated_loss = 0.0
@@ -1077,7 +1248,8 @@ class LoRATrainer:
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
 
-                avg_loss = accumulated_loss / accumulation_step
+                avg_loss = accumulated_loss.item() / accumulation_step
+                self.module.training_losses.append(float(avg_loss))
                 if global_step % self.training_config.log_every_n_steps == 0:
                     yield global_step, avg_loss, f"Epoch {epoch+1}, Step {global_step}, Loss: {avg_loss:.4f}"
 
@@ -1085,21 +1257,20 @@ class LoRATrainer:
                 num_updates += 1
                 accumulated_loss = 0.0
                 accumulation_step = 0
-            
+
             epoch_time = time.time() - epoch_start_time
             avg_epoch_loss = epoch_loss / max(num_updates, 1)
             yield global_step, avg_epoch_loss, f"✅ Epoch {epoch+1}/{self.training_config.max_epochs} in {epoch_time:.1f}s"
-            
             if (epoch + 1) % self.training_config.save_every_n_epochs == 0:
                 checkpoint_dir = os.path.join(self.training_config.output_dir, "checkpoints", f"epoch_{epoch+1}")
                 save_lora_weights(self.module.model, checkpoint_dir)
-                yield global_step, avg_epoch_loss, f"💾 Checkpoint saved"
-        
+                yield global_step, avg_epoch_loss, "💾 Checkpoint saved"
+
         final_path = os.path.join(self.training_config.output_dir, "final")
         save_lora_weights(self.module.model, final_path)
         final_loss = self.module.training_losses[-1] if self.module.training_losses else 0.0
         yield global_step, final_loss, f"✅ Training complete! LoRA saved to {final_path}"
-    
+
     def stop(self):
         """Stop training."""
         self.is_training = False
@@ -1187,7 +1358,6 @@ class PreprocessedLoKRModule(nn.Module):
             diffusion_loss = F.mse_loss(decoder_outputs[0], flow)
 
         diffusion_loss = diffusion_loss.float()
-        self.training_losses.append(diffusion_loss.item())
         return diffusion_loss
 
 
@@ -1244,6 +1414,14 @@ class LoKRTrainer:
                 yield 0, 0.0, "❌ LyCORIS not installed. Install lycoris-lora to train LoKr."
                 return
 
+            # Enable TF32 for fp32 matmuls on Ampere+ GPUs (matches V2 CLI trainers).
+            torch.set_float32_matmul_precision("high")
+            # Disable cuDNN benchmark: training uses variable-length inputs
+            # (collate pads to per-batch max), so benchmark would cache a
+            # workspace for every unique shape seen, inflating VRAM across
+            # epochs without bound.
+            torch.backends.cudnn.benchmark = False
+
             torch.manual_seed(self.training_config.seed)
             random.seed(self.training_config.seed)
             if torch.cuda.is_available():
@@ -1261,8 +1439,23 @@ class LoKRTrainer:
                 device=self.dit_handler.device,
                 dtype=self.dit_handler.dtype,
             )
+            # Load previously trained weights if specified (LyCORIS has built-in load_weights)
+            if self.training_config.network_weights:
+                try:
+                    lycoris_net = getattr(self.module, "lycoris_net", None)
+                    if lycoris_net is None:
+                        yield 0, 0.0, "❌ LoKr network not initialized, cannot load weights"
+                        return
+                    info = lycoris_net.load_weights(self.training_config.network_weights)
+                    logger.info(f"Loaded network weights from {self.training_config.network_weights}: {info}")
+                    yield 0, 0.0, f"📥 Loaded network weights: {info}"
+                except Exception as exc:
+                    yield 0, 0.0, f"❌ Failed to load network weights: {exc}"
+                    return
+
             ckpt_enabled, cache_disabled, input_grads_enabled = _configure_training_memory_features(
-                self.module.model.decoder
+                self.module.model.decoder,
+                enable_gradient_checkpointing=bool(self.training_config.gradient_checkpointing),
             )
             self.module.force_input_grads_for_checkpointing = ckpt_enabled
             logger.info(
@@ -1278,6 +1471,7 @@ class LoKRTrainer:
                 prefetch_factor=self.training_config.prefetch_factor,
                 persistent_workers=self.training_config.persistent_workers,
                 pin_memory_device=self.training_config.pin_memory_device,
+                sample_cache_size=getattr(self.training_config, "sample_cache_size", 0),
                 val_split=self.training_config.val_split,
             )
             data_module.setup('fit')
@@ -1309,6 +1503,27 @@ class LoKRTrainer:
             logger.exception("LoKr training failed")
             yield 0, 0.0, f"❌ Training failed: {str(e)}"
         finally:
+            # Restore decoder from LoKr modifications so the live model
+            # returns to a clean state after training.  Without this the
+            # decoder keeps LyCORIS hooks active while the handler has no
+            # knowledge of them, causing corrupted inference and double-
+            # injection when the user later loads the saved LoKr weights.
+            lycoris_net = getattr(self.module, "lycoris_net", None) if self.module is not None else None
+            if lycoris_net is not None:
+                try:
+                    if hasattr(lycoris_net, "restore"):
+                        lycoris_net.restore()
+                        logger.info("LoKr adapters removed from decoder after training")
+                except Exception:
+                    logger.exception("Failed to restore LoKr adapters after training")
+                # Clean up the reference on the decoder
+                decoder = getattr(getattr(self.module, "model", None), "decoder", None)
+                if decoder is not None:
+                    try:
+                        if hasattr(decoder, "_lycoris_net"):
+                            delattr(decoder, "_lycoris_net")
+                    except Exception:
+                        pass
             if self.module is not None and hasattr(self.module, "model"):
                 _unwrap_stale_fabric_decoder(self.module.model)
             if getattr(self, "dit_handler", None) is not None and getattr(self.dit_handler, "model", None) is not None:
@@ -1321,7 +1536,6 @@ class LoKRTrainer:
         training_state: Optional[Dict],
     ) -> Generator[Tuple[int, float, str], None, None]:
         os.makedirs(self.training_config.output_dir, exist_ok=True)
-
         device_type = self.module.device_type
         precision = _select_fabric_precision(device_type)
         accelerator = device_type if device_type in ("cuda", "xpu", "mps", "cpu") else "auto"
@@ -1353,18 +1567,12 @@ class LoKRTrainer:
                 "relying on AMP/GradScaler handling."
             )
 
-        if device_type == "mps" or precision.endswith("-mixed"):
-            self.module.model.decoder = self.module.model.decoder.to(dtype=torch.float32)
-        else:
-            self.module.model.decoder = self.module.model.decoder.to(dtype=self.module.dtype)
-        casted_trainable, total_trainable_tensors = _ensure_trainable_params_fp32(self.module.model.decoder)
-        if total_trainable_tensors == 0 and getattr(self.module, "lycoris_net", None) is not None:
-            casted_fallback, total_fallback = _ensure_trainable_params_fp32(self.module.lycoris_net)
-            casted_trainable += casted_fallback
-            total_trainable_tensors += total_fallback
-        logger.info(
-            f"Trainable tensor dtype fixup: casted {casted_trainable}/{total_trainable_tensors} to fp32"
-        )
+        # LyCORIS LoKr: uniform dtype for all parameters.
+        # Unlike PEFT LoRA, LyCORIS hooks compute diff_weight.to(base_weight.dtype)
+        # internally.  Mixed-dtype (trainable fp32, frozen bf16) causes wasteful
+        # round-trip casts on every forward/backward.  Keep everything in compute
+        # dtype and let Fabric bf16-mixed autocast handle precision.
+        self.module.model = self.module.model.to(self.module.dtype)
 
         train_loader = data_module.train_dataloader()
         trainable_params = _collect_lokr_trainable_params(
@@ -1379,11 +1587,6 @@ class LoKRTrainer:
         if not trainable_params:
             yield 0, 0.0, "❌ No trainable parameters found!"
             return
-        if total_trainable_tensors == 0:
-            logger.warning(
-                "LoKr trainable params discovered via LyCORIS fallback traversal; "
-                "decoder parameter traversal returned 0 trainables."
-            )
 
         yield 0, 0.0, f"🎯 Training {sum(p.numel() for p in trainable_params):,} parameters"
 
@@ -1418,11 +1621,10 @@ class LoKRTrainer:
         )
 
         self.module.model.decoder, optimizer = self.fabric.setup(self.module.model.decoder, optimizer)
-        casted_opt_params, total_opt_params = _ensure_optimizer_params_fp32(optimizer)
-        logger.info(
-            f"Optimizer param dtype fixup: casted {casted_opt_params}/{total_opt_params} to fp32"
-        )
-        train_loader = self.fabric.setup_dataloaders(train_loader)
+        try:
+            train_loader = self.fabric.setup_dataloaders(train_loader, move_to_device=False)
+        except TypeError:
+            train_loader = self.fabric.setup_dataloaders(train_loader)
 
         accumulation_step = 0
         accumulated_loss = 0.0
@@ -1435,16 +1637,32 @@ class LoKRTrainer:
             num_updates = 0
             epoch_start_time = time.time()
 
-            for batch in train_loader:
+            epoch_data_wait_time = 0.0
+            epoch_compute_time = 0.0
+            train_iter = iter(train_loader)
+            while True:
+                fetch_started = time.perf_counter()
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    break
+                epoch_data_wait_time += time.perf_counter() - fetch_started
+
+                step_started = time.perf_counter()
                 if training_state and training_state.get("should_stop", False):
-                    yield global_step, accumulated_loss / max(accumulation_step, 1), "⏹️ Training stopped by user"
+                    stop_loss = (
+                        accumulated_loss.item() / max(accumulation_step, 1)
+                        if isinstance(accumulated_loss, torch.Tensor)
+                        else accumulated_loss / max(accumulation_step, 1)
+                    )
+                    yield global_step, stop_loss, "Training stopped by user"
                     return
 
                 loss = self.module.training_step(batch)
                 loss = loss / self.training_config.gradient_accumulation_steps
 
                 self.fabric.backward(loss)
-                accumulated_loss += loss.item()
+                accumulated_loss = _accumulate_loss_without_sync(accumulated_loss, loss)
                 accumulation_step += 1
 
                 if accumulation_step >= self.training_config.gradient_accumulation_steps:
@@ -1469,7 +1687,6 @@ class LoKRTrainer:
                             accumulated_loss = 0.0
                             accumulation_step = 0
                             continue
-
                     self.fabric.clip_gradients(
                         self.module.model.decoder,
                         optimizer,
@@ -1483,18 +1700,26 @@ class LoKRTrainer:
                     global_step += 1
 
                     avg_loss = accumulated_loss / accumulation_step
+                    avg_loss_value = float(avg_loss.item()) if isinstance(avg_loss, torch.Tensor) else float(avg_loss)
+                    self.module.training_losses.append(avg_loss_value)
                     if global_step % self.training_config.log_every_n_steps == 0:
-                        self.fabric.log("train/loss", avg_loss, step=global_step)
+                        self.fabric.log("train/loss", avg_loss_value, step=global_step)
                         self.fabric.log("train/lr", scheduler.get_last_lr()[0], step=global_step)
-                        yield global_step, avg_loss, (
+                        yield global_step, avg_loss_value, (
                             f"Epoch {epoch+1}/{self.training_config.max_epochs}, "
-                            f"Step {global_step}, Loss: {avg_loss:.4f}"
+                            f"Step {global_step}, Loss: {avg_loss_value:.4f}"
                         )
 
-                    epoch_loss += avg_loss
+                    epoch_loss += avg_loss_value
                     num_updates += 1
                     accumulated_loss = 0.0
                     accumulation_step = 0
+
+                    # Cap training_losses to prevent unbounded CPU memory growth.
+                    if len(self.module.training_losses) > 2000:
+                        self.module.training_losses = self.module.training_losses[-1000:]
+
+                epoch_compute_time += time.perf_counter() - step_started
 
             if accumulation_step > 0:
                 if manual_nonfinite_check:
@@ -1531,30 +1756,51 @@ class LoKRTrainer:
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
                 avg_loss = accumulated_loss / accumulation_step
+                avg_loss_value = float(avg_loss.item()) if isinstance(avg_loss, torch.Tensor) else float(avg_loss)
                 if global_step % self.training_config.log_every_n_steps == 0:
-                    self.fabric.log("train/loss", avg_loss, step=global_step)
+                    self.fabric.log("train/loss", avg_loss_value, step=global_step)
                     self.fabric.log("train/lr", scheduler.get_last_lr()[0], step=global_step)
-                    yield global_step, avg_loss, (
+                    yield global_step, avg_loss_value, (
                         f"Epoch {epoch+1}/{self.training_config.max_epochs}, "
-                        f"Step {global_step}, Loss: {avg_loss:.4f}"
+                        f"Step {global_step}, Loss: {avg_loss_value:.4f}"
                     )
 
-                epoch_loss += avg_loss
+                epoch_loss += avg_loss_value
                 num_updates += 1
                 accumulated_loss = 0.0
                 accumulation_step = 0
 
             epoch_time = time.time() - epoch_start_time
             avg_epoch_loss = epoch_loss / max(num_updates, 1)
-
             self.fabric.log("train/epoch_loss", avg_epoch_loss, step=epoch + 1)
             yield global_step, avg_epoch_loss, (
                 f"✅ Epoch {epoch+1}/{self.training_config.max_epochs} "
                 f"in {epoch_time:.1f}s, Loss: {avg_epoch_loss:.4f}"
             )
 
+            epoch_total_busy = epoch_data_wait_time + epoch_compute_time
+            if epoch_total_busy > 0:
+                io_wait_ratio = epoch_data_wait_time / epoch_total_busy
+                yield global_step, avg_epoch_loss, (
+                    f"📊 Data wait ratio: {io_wait_ratio:.1%} "
+                    f"(wait {epoch_data_wait_time:.1f}s / compute {epoch_compute_time:.1f}s)"
+                )
+
+            # Release allocator-reserved memory to reduce peak VRAM between epochs.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                alloc_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
+                yield global_step, avg_epoch_loss, (
+                    f"🧠 VRAM: {alloc_mb:.0f} MB allocated / {reserved_mb:.0f} MB reserved"
+                )
+
             if (epoch + 1) % self.training_config.save_every_n_epochs == 0:
-                checkpoint_dir = os.path.join(self.training_config.output_dir, "checkpoints", f"epoch_{epoch+1}")
+                checkpoint_dir = os.path.join(
+                    self.training_config.output_dir,
+                    "checkpoints",
+                    f"epoch_{epoch+1}",
+                )
                 save_lokr_training_checkpoint(
                     self.module.lycoris_net,
                     optimizer,
@@ -1568,7 +1814,9 @@ class LoKRTrainer:
                 yield global_step, avg_epoch_loss, f"💾 Checkpoint saved at epoch {epoch+1}"
 
         final_path = os.path.join(self.training_config.output_dir, "final")
-        final_metadata: Dict[str, Any] = {"lokr_config": self.lokr_config.to_dict()}
+        final_metadata: Dict[str, Any] = {
+            "lokr_config": self.lokr_config.to_dict() if self.lokr_config else None,
+        }
         if self.run_metadata:
             final_metadata["run_metadata"] = self.run_metadata
         save_lokr_weights(
@@ -1586,6 +1834,9 @@ class LoKRTrainer:
     ) -> Generator[Tuple[int, float, str], None, None]:
         yield 0, 0.0, "🚀 Starting basic training loop..."
         os.makedirs(self.training_config.output_dir, exist_ok=True)
+
+        # LyCORIS LoKr: uniform dtype — same rationale as _train_with_fabric.
+        self.module.model = self.module.model.to(self.module.dtype)
 
         train_loader = data_module.train_dataloader()
         trainable_params = _collect_lokr_trainable_params(
@@ -1625,15 +1876,31 @@ class LoKRTrainer:
             num_updates = 0
             epoch_start_time = time.time()
 
-            for batch in train_loader:
+            epoch_data_wait_time = 0.0
+            epoch_compute_time = 0.0
+            train_iter = iter(train_loader)
+            while True:
+                fetch_started = time.perf_counter()
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    break
+                epoch_data_wait_time += time.perf_counter() - fetch_started
+
+                step_started = time.perf_counter()
                 if training_state and training_state.get("should_stop", False):
-                    yield global_step, accumulated_loss / max(accumulation_step, 1), "⏹️ Training stopped"
+                    stop_loss = (
+                        accumulated_loss.item() / max(accumulation_step, 1)
+                        if isinstance(accumulated_loss, torch.Tensor)
+                        else accumulated_loss / max(accumulation_step, 1)
+                    )
+                    yield global_step, stop_loss, "⏹️ Training stopped"
                     return
 
                 loss = self.module.training_step(batch)
                 loss = loss / self.training_config.gradient_accumulation_steps
                 loss.backward()
-                accumulated_loss += loss.item()
+                accumulated_loss = _accumulate_loss_without_sync(accumulated_loss, loss)
                 accumulation_step += 1
 
                 if accumulation_step >= self.training_config.gradient_accumulation_steps:
@@ -1644,13 +1911,21 @@ class LoKRTrainer:
                     global_step += 1
 
                     avg_loss = accumulated_loss / accumulation_step
+                    avg_loss_value = float(avg_loss.item()) if isinstance(avg_loss, torch.Tensor) else float(avg_loss)
+                    self.module.training_losses.append(avg_loss_value)
                     if global_step % self.training_config.log_every_n_steps == 0:
-                        yield global_step, avg_loss, f"Epoch {epoch+1}, Step {global_step}, Loss: {avg_loss:.4f}"
+                        yield global_step, avg_loss_value, f"Epoch {epoch+1}, Step {global_step}, Loss: {avg_loss_value:.4f}"
 
-                    epoch_loss += avg_loss
+                    epoch_loss += avg_loss_value
                     num_updates += 1
                     accumulated_loss = 0.0
                     accumulation_step = 0
+
+                    # Cap training_losses to prevent unbounded CPU memory growth.
+                    if len(self.module.training_losses) > 2000:
+                        self.module.training_losses = self.module.training_losses[-1000:]
+
+                epoch_compute_time += time.perf_counter() - step_started
 
             if accumulation_step > 0:
                 torch.nn.utils.clip_grad_norm_(trainable_params, self.training_config.max_grad_norm)
@@ -1660,10 +1935,11 @@ class LoKRTrainer:
                 global_step += 1
 
                 avg_loss = accumulated_loss / accumulation_step
+                avg_loss_value = float(avg_loss.item()) if isinstance(avg_loss, torch.Tensor) else float(avg_loss)
                 if global_step % self.training_config.log_every_n_steps == 0:
-                    yield global_step, avg_loss, f"Epoch {epoch+1}, Step {global_step}, Loss: {avg_loss:.4f}"
+                    yield global_step, avg_loss_value, f"Epoch {epoch+1}, Step {global_step}, Loss: {avg_loss_value:.4f}"
 
-                epoch_loss += avg_loss
+                epoch_loss += avg_loss_value
                 num_updates += 1
                 accumulated_loss = 0.0
                 accumulation_step = 0
@@ -1671,6 +1947,23 @@ class LoKRTrainer:
             epoch_time = time.time() - epoch_start_time
             avg_epoch_loss = epoch_loss / max(num_updates, 1)
             yield global_step, avg_epoch_loss, f"✅ Epoch {epoch+1}/{self.training_config.max_epochs} in {epoch_time:.1f}s"
+
+            epoch_total_busy = epoch_data_wait_time + epoch_compute_time
+            if epoch_total_busy > 0:
+                io_wait_ratio = epoch_data_wait_time / epoch_total_busy
+                yield global_step, avg_epoch_loss, (
+                    f"📊 Data wait ratio: {io_wait_ratio:.1%} "
+                    f"(wait {epoch_data_wait_time:.1f}s / compute {epoch_compute_time:.1f}s)"
+                )
+
+            # Release allocator-reserved memory to reduce peak VRAM between epochs.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                alloc_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
+                yield global_step, avg_epoch_loss, (
+                    f"🧠 VRAM: {alloc_mb:.0f} MB allocated / {reserved_mb:.0f} MB reserved"
+                )
 
             if (epoch + 1) % self.training_config.save_every_n_epochs == 0:
                 checkpoint_dir = os.path.join(self.training_config.output_dir, "checkpoints", f"epoch_{epoch+1}")
@@ -1687,7 +1980,9 @@ class LoKRTrainer:
                 yield global_step, avg_epoch_loss, "💾 Checkpoint saved"
 
         final_path = os.path.join(self.training_config.output_dir, "final")
-        final_metadata: Dict[str, Any] = {"lokr_config": self.lokr_config.to_dict()}
+        final_metadata: Dict[str, Any] = {
+            "lokr_config": self.lokr_config.to_dict() if self.lokr_config else None,
+        }
         if self.run_metadata:
             final_metadata["run_metadata"] = self.run_metadata
         save_lokr_weights(

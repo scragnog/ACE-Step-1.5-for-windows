@@ -1,0 +1,60 @@
+1931:         if needs_model_fn:
+1932:             def _make_model_fn(decoder, do_cfg, attention_mask, encoder_hs, encoder_am,
+1933:                                context_lat, guidance_scale, g_fn, cfg_start, cfg_end,
+1934:                                momentum_buf, bsz_val, device_val, dtype_val):
+1935:                 def model_fn(xt_inner, t_val):
+1936:                     x_in = torch.cat([xt_inner, xt_inner], dim=0) if do_cfg else xt_inner
+1937:                     t_tensor = t_val * torch.ones((x_in.shape[0],), device=device_val, dtype=dtype_val)
+1938:                     out = decoder(
+1939:                         hidden_states=x_in, timestep=t_tensor, timestep_r=t_tensor,
+1940:                         attention_mask=attention_mask, encoder_hidden_states=encoder_hs,
+1941:                         encoder_attention_mask=encoder_am, context_latents=context_lat,
+1942:                         use_cache=False, past_key_values=None,
+1943:                     )
+1944:                     vt_inner = out[0]
+1945:                     apply_cfg = t_val >= cfg_start and t_val <= cfg_end
+1946:                     if do_cfg:
+1947:                         p_cond, p_uncond = vt_inner.chunk(2)
+1948:                         if apply_cfg:
+1949:                             vt_inner = g_fn(
+1950:                                 p_cond, p_uncond, guidance_scale,
+1951:                                 momentum_buffer=momentum_buf,
+1952:                                 disable_momentum=True,
+1953:                                 latents=xt_inner, sigma=t_val,
+1954:                             )
+1955:                         else:
+1956:                             vt_inner = p_cond
+1957:                     return vt_inner
+1958:                 return model_fn
+1959: 
+1960:             model_fn = _make_model_fn(
+1961:                 self.decoder, do_cfg_guidance, attention_mask,
+1962:                 encoder_hidden_states, encoder_attention_mask, context_latents,
+1963:                 diffusion_guidance_sale, guidance_fn, cfg_interval_start, cfg_interval_end,
+1964:                 momentum_buffer, bsz, device, dtype,
+1965:             )
+1966: 
+1967:         solver_state = {}
+1968:         _switched_to_non_cover = False
+1969:         logger.info(f"[generate_audio] Starting diffusion: solver={solver_name}, steps={infer_steps}, shift={shift}")
+1970:         with torch.no_grad():
+1971:             for step_idx, (t_curr, t_prev) in enumerate(iterator):
+1972:                 if step_idx >= cover_steps and not _switched_to_non_cover:
+1973:                     _switched_to_non_cover = True
+1974:                     if do_cfg_guidance:
+1975:                         encoder_hidden_states_non_cover = torch.cat([encoder_hidden_states_non_cover, self.null_condition_emb.expand_as(encoder_hidden_states_non_cover)], dim=0)
+1976:                         encoder_attention_mask_non_cover = torch.cat([encoder_attention_mask_non_cover, encoder_attention_mask_non_cover], dim=0)
+1977:                         context_latents_non_cover = torch.cat([context_latents_non_cover, context_latents_non_cover], dim=0)
+1978: 
+1979:                     encoder_hidden_states = encoder_hidden_states_non_cover
+1980:                     encoder_attention_mask = encoder_attention_mask_non_cover
+1981:                     context_latents = context_latents_non_cover
+1982:                     past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
+1983:                     # Rebuild model_fn with updated encoder states for non-cover
+1984:                     if needs_model_fn:
+1985:                         model_fn = _make_model_fn(
+1986:                             self.decoder, do_cfg_guidance, attention_mask,
+1987:                             encoder_hidden_states, encoder_attention_mask, context_latents,
+1988:                             diffusion_guidance_sale, guidance_fn, cfg_interval_start, cfg_interval_end,
+1989:                             momentum_buffer, bsz, device, dtype,
+1990:                         )

@@ -47,7 +47,7 @@ def apg_forward(
     if norm_threshold > 0:
         ones = torch.ones_like(diff)
         diff_norm = diff.norm(p=2, dim=dims, keepdim=True)
-        scale_factor = torch.minimum(ones, norm_threshold / diff_norm)
+        scale_factor = torch.minimum(ones, norm_threshold / (diff_norm + 1e-8))
         diff = diff * scale_factor
 
     diff_parallel, diff_orthogonal = project(diff, pred_cond, dims)
@@ -71,8 +71,8 @@ def call_cos_tensor(tensor1, tensor2):
     Returns:
         Cosine similarity value [B, 1]
     """
-    tensor1 = tensor1 / torch.linalg.norm(tensor1, dim=1, keepdim=True)
-    tensor2 = tensor2 / torch.linalg.norm(tensor2, dim=1, keepdim=True)
+    tensor1 = tensor1 / (torch.linalg.norm(tensor1, dim=1, keepdim=True) + 1e-8)
+    tensor2 = tensor2 / (torch.linalg.norm(tensor2, dim=1, keepdim=True) + 1e-8)
     cosvalue = torch.sum(tensor1 * tensor2, dim=1, keepdim=True)
     return cosvalue
 
@@ -152,6 +152,13 @@ def adg_forward(
     else:
         raise TypeError(f"sigma must be a number or tensor, got {type(sigma)}")
 
+    # Extreme edge case for multi-step solvers (Heun/RK4) that evaluate exactly at t=0.0.
+    # ADG converts velocity to x_0 by multiplying by sigma, applies angle guidance,
+    # and converts back to velocity by dividing by sigma. At sigma=0, this is 0/0 = NaN.
+    # Just return standard CFG velocity for the theoretical end of the trajectory.
+    if sigma.max() < 1e-4:
+        return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
     # Adjust guidance weight
     weight = guidance_scale - 1
     weight = weight * (weight > 0) + 1e-3
@@ -161,21 +168,32 @@ def adg_forward(
     latent_diff = latent_hat_text - latent_hat_uncond
 
     # Calculate angle between conditional and unconditional predicted data
-    latent_theta = torch.acos(
-        call_cos_tensor(latent_hat_text.view(-1, c).to(float),
-                        latent_hat_uncond.reshape(-1, c).contiguous().to(float)))
+    cos_val = call_cos_tensor(latent_hat_text.view(-1, c).to(float),
+                              latent_hat_uncond.reshape(-1, c).contiguous().to(float))
+    # Safety clamp to prevent NaN from torch.acos if cos_val > 1.0 or < -1.0 due to float precision
+    cos_val = torch.clamp(cos_val, -0.99999, 0.99999)
+    latent_theta = torch.acos(cos_val)
+    
     latent_theta_new = torch.clip(weight * latent_theta, -angle_clip, angle_clip) if apply_clip else weight * latent_theta
     proj, perp = compute_perpendicular_component(latent_diff, latent_hat_uncond)
     latent_v_new = torch.cos(latent_theta_new) * latent_hat_text
 
-    latent_p_new = perp * torch.sin(latent_theta_new) / torch.sin(latent_theta) * (
-        torch.sin(latent_theta) > 1e-3) + perp * weight * (torch.sin(latent_theta) <= 1e-3)
+    # Safe division to prevent PyTorch from evaluating `/ 0` before applying the mask
+    sin_theta = torch.sin(latent_theta)
+    safe_sin_theta = torch.where(sin_theta > 1e-3, sin_theta, torch.ones_like(sin_theta))
+    
+    latent_p_new = perp * torch.sin(latent_theta_new) / safe_sin_theta * (
+        sin_theta > 1e-3) + perp * weight * (sin_theta <= 1e-3)
+    
     latent_new = latent_v_new + latent_p_new
+    
     if apply_norm:
-        latent_new = latent_new * torch.linalg.norm(latent_hat_text, dim=1, keepdim=True) / torch.linalg.norm(
-            latent_new, dim=1, keepdim=True)
+        norm_text = torch.linalg.norm(latent_hat_text, dim=1, keepdim=True)
+        norm_new = torch.linalg.norm(latent_new, dim=1, keepdim=True)
+        latent_new = latent_new * norm_text / (norm_new + 1e-8)
 
-    noise_pred = (latents - latent_new) / sigma
+    # Safe division by sigma (in case RK4 evaluates exactly at t=0)
+    noise_pred = (latents - latent_new) / (sigma + 1e-8)
     noise_pred = noise_pred.reshape(n, t, c).to(latents.dtype)
     return noise_pred
 

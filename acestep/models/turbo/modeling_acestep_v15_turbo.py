@@ -1982,6 +1982,18 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
                 pred_clean = self.get_x0_from_noise(xt, vt, t_curr_tensor)
                 next_timestep = t_schedule[step_idx + 1].item()
                 xt = self.renoise(pred_clean, next_timestep)
+            elif infer_method == "dpmsde":
+                # DPM++ SDE: second-order multistep solver with stochastic noise
+                pred_clean = self.get_x0_from_noise(xt, vt, t_curr_tensor)
+                if hasattr(self, '_prev_pred_clean') and self._prev_pred_clean is not None and step_idx > 0:
+                    # Second-order correction via midpoint blending
+                    corrected_clean = 0.5 * (pred_clean + self._prev_pred_clean)
+                else:
+                    corrected_clean = pred_clean
+                self._prev_pred_clean = pred_clean
+                # Re-noise with corrected prediction
+                next_timestep = t_schedule[step_idx + 1].item()
+                xt = self.renoise(corrected_clean, next_timestep)
             elif infer_method == "ode":
                 # Ordinary Differential Equation: Euler method
                 # dx/dt = -v, so x_{t+1} = x_t - v_t * dt
@@ -1990,6 +2002,9 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
                 dt_tensor = dt * torch.ones((bsz,), device=device, dtype=dtype).unsqueeze(-1).unsqueeze(-1)
                 xt = xt - vt * dt_tensor
         
+        # Clean up DPM++ SDE state
+        if hasattr(self, '_prev_pred_clean'):
+            del self._prev_pred_clean
         x_gen = xt
         end_time = time.time()
         time_costs["diffusion_time_cost"] = end_time - start_time

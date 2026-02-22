@@ -1,0 +1,45 @@
+2001:     chunk_mask = torch.ones(2, base_seq_len, 64, dtype=model_dtype, device=device)
+2002:     chunk_mask[0, pad_start:] = 0
+2003: 
+2004:     silence_latent = torch.randn(2, base_seq_len, 64, dtype=model_dtype, device=device)
+2005:     # New required parameters for updated training logic
+2006:     src_latents = torch.randn(2, base_seq_len, 64, dtype=model_dtype, device=device)  # Source latents for context
+2007:     is_covers = torch.tensor([0, 1], dtype=torch.long, device=device)  # Cover song indicators (0=original, 1=cover)
+2008: 
+2009:     # Test 1: Flow matching training (using 10s sequence for sanity check by default)
+2010:     print(f"Testing flow matching training with {base_seconds}s sequence ({base_seq_len} frames @ {frames_per_second}Hz)...")
+2011:     outputs = model.training_losses(
+2012:         hidden_states=hidden_states,
+2013:         attention_mask=attention_mask,
+2014:         chunk_masks=chunk_mask,
+2015:         text_hidden_states=text_hidden_states,
+2016:         text_attention_mask=text_attention_mask,
+2017:         lyric_hidden_states=lyric_hidden_states,
+2018:         lyric_attention_mask=lyric_attention_mask,
+2019:         refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
+2020:         refer_audio_order_mask=refer_audio_order_mask,
+2021:         silence_latent=silence_latent,
+2022:         src_latents=src_latents,
+2023:         is_covers=is_covers,
+2024:         cfg_ratio=0.15,
+2025:     )
+2026:     loss = outputs['diffusion_loss']
+2027:     print(f"Flow matching loss: {loss.item():.6f}")
+2028:     print(f"  Loss stats - min: {loss.min().item():.6f}, max: {loss.max().item():.6f}, mean: {loss.mean().item():.6f}, std: {loss.std().item() if loss.numel() > 1 else 0:.6f}")
+2029: 
+2030:     # Test 2: Generation with flow matching, testing throughput for different sequence lengths
+2031:     lengths_seconds = [10, 30, 60, 120, 180, 240]
+2032:     infer_steps = 2  # Can be increased as needed (e.g., 50/100) to better approximate real inference
+2033: 
+2034:     print("\n===== Throughput benchmark (25Hz hidden states) =====")
+2035:     for seconds in lengths_seconds:
+2036:         seq_len = seconds * frames_per_second
+2037: 
+2038:         # Reconstruct inputs for current sequence length
+2039:         cur_hidden_states = torch.randn(2, seq_len, 64, dtype=model_dtype, device=device)
+2040:         cur_attention_mask = torch.ones(2, seq_len, dtype=model_dtype, device=device)
+2041:         cur_chunk_mask = torch.ones(2, seq_len, 64, dtype=model_dtype, device=device)
+2042:         cur_silence_latent = torch.randn(2, seq_len, 64, dtype=model_dtype, device=device)
+2043:         cur_src_latents = torch.randn(2, seq_len, 64, dtype=model_dtype, device=device)
+2044: 
+2045:         print(f"\n--- {seconds}s input ({seq_len} frames @ {frames_per_second}Hz) ---")

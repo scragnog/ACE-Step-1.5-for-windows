@@ -19,11 +19,16 @@ class GenerateMusicExecuteMixin:
         actual_seed_list: Optional[List[int]],
         audio_cover_strength: float,
         cover_noise_strength: float,
-        use_adg: bool,
+        guidance_mode: str,
         cfg_interval_start: float,
         cfg_interval_end: float,
         shift: float,
         infer_method: str,
+        # PAG (Perturbed-Attention Guidance) Parameters
+        use_pag: bool = False,
+        pag_start: float = 0.30,
+        pag_end: float = 0.80,
+        pag_scale: float = 0.2,
     ) -> Dict[str, Any]:
         """Invoke ``service_generate`` while maintaining background progress estimation."""
         infer_steps_for_progress = len(timesteps) if timesteps else inference_steps
@@ -56,7 +61,8 @@ class GenerateMusicExecuteMixin:
                 instructions=service_inputs["instructions_batch"],
                 audio_cover_strength=audio_cover_strength,
                 cover_noise_strength=cover_noise_strength,
-                use_adg=use_adg,
+                use_adg=False,  # Legacy compat
+                guidance_mode=guidance_mode,
                 cfg_interval_start=cfg_interval_start,
                 cfg_interval_end=cfg_interval_end,
                 shift=shift,
@@ -64,6 +70,10 @@ class GenerateMusicExecuteMixin:
                 audio_code_hints=service_inputs["audio_code_hints_batch"],
                 return_intermediate=service_inputs["should_return_intermediate"],
                 timesteps=timesteps,
+                use_pag=use_pag,
+                pag_start=pag_start,
+                pag_end=pag_end,
+                pag_scale=pag_scale,
             )
         finally:
             if stop_event is not None:

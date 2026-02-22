@@ -1806,7 +1806,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         precomputed_lm_hints_25Hz: Optional[torch.FloatTensor] = None,
         audio_codes: Optional[torch.FloatTensor] = None,
         use_progress_bar: bool = True,
-        use_adg: bool = False,
+        guidance_mode: str = "apg",
         shift: float = 1.0,
         timesteps: Optional[torch.Tensor] = None,
         cover_noise_strength: float = 0.0,
@@ -1865,7 +1865,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         # Use custom timesteps if provided, otherwise compute from infer_steps and shift
         if timesteps is not None:
             t = timesteps.to(device=device, dtype=dtype)
-            infer_steps = len(t) - 1  # Override infer_steps based on timesteps length
+            infer_steps = len(t) - 1
         else:
             t = torch.linspace(1.0, 0.0, infer_steps + 1, device=device, dtype=dtype)
             # Apply shift transformation to timesteps if shift != 1.0
@@ -1918,6 +1918,58 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
             context_latents = torch.cat([context_latents, context_latents], dim=0)
             attention_mask = torch.cat([attention_mask, attention_mask], dim=0)
         
+        from acestep.core.generation.solvers import get_solver, VALID_SOLVERS
+        from acestep.core.generation.guidance import get_guidance, VALID_GUIDANCE
+
+        # Map legacy method names to solver names
+        solver_name = {"ode": "euler", "sde": "euler", "dpmsde": "euler"}.get(infer_method, infer_method)
+        solver_fn, needs_model_fn = get_solver(solver_name)
+
+        # Get guidance function
+        _gm = guidance_mode if guidance_mode else "apg"
+        if kwargs.get("use_adg", False) and _gm == "apg":
+            _gm = "adg"
+        guidance_fn = get_guidance(_gm)
+
+        # Build model_fn callback for multi-evaluation solvers (Heun, RK4)
+        model_fn = None
+        if needs_model_fn:
+            def _make_model_fn(decoder, do_cfg, attention_mask, encoder_hs, encoder_am,
+                               context_lat, guidance_scale, g_fn, cfg_start, cfg_end,
+                               momentum_buf, bsz_val, device_val, dtype_val):
+                def model_fn(xt_inner, t_val):
+                    x_in = torch.cat([xt_inner, xt_inner], dim=0) if do_cfg else xt_inner
+                    t_tensor = t_val * torch.ones((x_in.shape[0],), device=device_val, dtype=dtype_val)
+                    out = decoder(
+                        hidden_states=x_in, timestep=t_tensor, timestep_r=t_tensor,
+                        attention_mask=attention_mask, encoder_hidden_states=encoder_hs,
+                        encoder_attention_mask=encoder_am, context_latents=context_lat,
+                        use_cache=False, past_key_values=None,
+                    )
+                    vt_inner = out[0]
+                    apply_cfg = t_val >= cfg_start and t_val <= cfg_end
+                    if do_cfg:
+                        p_cond, p_uncond = vt_inner.chunk(2)
+                        if apply_cfg:
+                            vt_inner = g_fn(
+                                p_cond, p_uncond, guidance_scale,
+                                momentum_buffer=momentum_buf,
+                                disable_momentum=True,
+                                latents=xt_inner, sigma=t_val,
+                            )
+                        else:
+                            vt_inner = p_cond
+                    return vt_inner
+                return model_fn
+
+            model_fn = _make_model_fn(
+                self.decoder, do_cfg_guidance, attention_mask,
+                encoder_hidden_states, encoder_attention_mask, context_latents,
+                diffusion_guidance_sale, guidance_fn, cfg_interval_start, cfg_interval_end,
+                momentum_buffer, bsz, device, dtype,
+            )
+
+        solver_state = {}
         _switched_to_non_cover = False
         with torch.no_grad():
             for step_idx, (t_curr, t_prev) in enumerate(iterator):
@@ -1926,14 +1978,21 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
                     if do_cfg_guidance:
                         encoder_hidden_states_non_cover = torch.cat([encoder_hidden_states_non_cover, self.null_condition_emb.expand_as(encoder_hidden_states_non_cover)], dim=0)
                         encoder_attention_mask_non_cover = torch.cat([encoder_attention_mask_non_cover, encoder_attention_mask_non_cover], dim=0)
-                        # src_latents
                         context_latents_non_cover = torch.cat([context_latents_non_cover, context_latents_non_cover], dim=0)
 
                     encoder_hidden_states = encoder_hidden_states_non_cover
                     encoder_attention_mask = encoder_attention_mask_non_cover
                     context_latents = context_latents_non_cover
                     past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
-                
+                    if needs_model_fn:
+                        model_fn = _make_model_fn(
+                            self.decoder, do_cfg_guidance, attention_mask,
+                            encoder_hidden_states, encoder_attention_mask, context_latents,
+                            diffusion_guidance_sale, guidance_fn, cfg_interval_start, cfg_interval_end,
+                            momentum_buffer, bsz, device, dtype,
+                        )
+
+                # Main decoder forward pass
                 x = torch.cat([xt, xt], dim=0) if do_cfg_guidance else xt
                 t_curr_tensor = t_curr * torch.ones((x.shape[0],), device=device, dtype=dtype)
                 decoder_outputs = self.decoder(
@@ -1947,45 +2006,29 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
                     use_cache=True,
                     past_key_values=past_key_values,
                 )
-                
+
                 vt = decoder_outputs[0]
                 past_key_values = decoder_outputs[1]
                 apply_cfg_guidance = t_curr >= cfg_interval_start and t_curr <= cfg_interval_end
                 if do_cfg_guidance:
                     pred_cond, pred_null_cond = vt.chunk(2)
                     if apply_cfg_guidance:
-                        if not use_adg:
-                            vt = apg_forward(
-                                pred_cond=pred_cond,
-                                pred_uncond=pred_null_cond,
-                                guidance_scale=diffusion_guidance_sale,
-                                momentum_buffer=momentum_buffer,
-                                dims=[1],
-                            )
-                        else:
-                            vt = adg_forward(
-                                latents=xt,
-                                noise_pred_cond=pred_cond,
-                                noise_pred_uncond=pred_null_cond,
-                                sigma=t_curr,
-                                guidance_scale=diffusion_guidance_sale,
-                            )
+                        dt_val = (t_curr - t_prev) if isinstance(t_prev, (int, float)) else float(t_curr - t_prev)
+                        vt = guidance_fn(
+                            pred_cond, pred_null_cond, diffusion_guidance_sale,
+                            momentum_buffer=momentum_buffer,
+                            latents=xt, sigma=t_curr,
+                            dt=dt_val,
+                            step_idx=step_idx, total_steps=infer_steps,
+                        )
                     else:
                         vt = pred_cond
-                # Update x_t based on inference method
-                if infer_method == "sde":
-                    # Stochastic Differential Equation: predict clean, then re-add noise
-                    t_curr_bsz = t_curr * torch.ones((bsz,), device=device, dtype=dtype)
-                    pred_clean = self.get_x0_from_noise(xt, vt, t_curr_bsz)
-                    next_timestep = 1.0 - (float(step_idx + 1) / infer_steps)
-                    xt = self.renoise(pred_clean, next_timestep)
-                elif infer_method == "ode":
-                    # Ordinary Differential Equation: Euler method
-                    # dx/dt = -v, so x_{t+1} = x_t - v_t * dt
-                    dt = t_curr - t_prev
-                    dt_tensor = dt * torch.ones((bsz,), device=device, dtype=dtype).unsqueeze(-1).unsqueeze(-1)
-                    xt = xt - vt * dt_tensor
-        
+
+                # Solver step
+                t_curr_f = t_curr.item() if isinstance(t_curr, torch.Tensor) else float(t_curr)
+                t_prev_f = t_prev.item() if isinstance(t_prev, torch.Tensor) else float(t_prev)
+                xt, solver_state = solver_fn(xt, vt, t_curr_f, t_prev_f, solver_state, model_fn=model_fn)
+
         x_gen = xt
         end_time = time.time()
         time_costs["diffusion_time_cost"] = end_time - start_time

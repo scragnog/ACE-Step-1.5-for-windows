@@ -1,8 +1,4 @@
-"""
-LoKr utilities for ACE-Step training and inference.
-
-This module integrates LyCORIS LoKr adapters with the ACE-Step decoder.
-"""
+"""LoKr utilities for ACE-Step training and inference."""
 
 import json
 import os
@@ -32,40 +28,41 @@ def check_lycoris_available() -> bool:
     return LYCORIS_AVAILABLE
 
 
-def _matches_target_module_name(module_name: str, target_modules) -> bool:
-    """Return True if a LyCORIS module name maps to one of target module suffixes."""
-    if not module_name:
-        return False
-    name = module_name.lower()
-    for target in target_modules or []:
-        t = str(target).strip().lower()
-        if not t:
-            continue
-        if name.endswith(t) or f"_{t}" in name or f".{t}" in name:
-            return True
-    return False
-
-
 def inject_lokr_into_dit(
     model,
     lokr_config: LoKRConfig,
     multiplier: float = 1.0,
 ) -> Tuple[Any, "LycorisNetwork", Dict[str, Any]]:
-    """
-    Inject LoKr adapters into the decoder.
+
+    """Inject LoKR adapters into the DiT decoder of the model using LyCORIS.
+
+    Args:
+        model: The AceStepConditionGenerationModel
+        lokr_config: LoKR configuration
+        multiplier: LoKR output multiplier (default 1.0)
 
     Returns:
-        Tuple: (model, lycoris_network, info_dict)
+        Tuple of (model, lycoris_network, info_dict)
     """
     if not LYCORIS_AVAILABLE:
         raise ImportError(
-            "LyCORIS library is required for LoKr training. "
-            "Install with: pip install lycoris-lora"
+            "LyCORIS library is required for LoKr training. Install with: pip install lycoris-lora"
         )
 
     decoder = model.decoder
 
-    # Freeze all existing params before creating adapter params.
+    prev_net = getattr(decoder, "_lycoris_net", None)
+    if prev_net is not None:
+        try:
+            if hasattr(prev_net, "restore"):
+                prev_net.restore()
+        except Exception:
+            pass
+        try:
+            delattr(decoder, "_lycoris_net")
+        except Exception:
+            pass
+
     for _, param in model.named_parameters():
         param.requires_grad = False
 
@@ -114,49 +111,23 @@ def inject_lokr_into_dit(
             logger.warning(f"DoRA mode not supported in current LyCORIS build: {exc}")
 
     lycoris_net.apply_to()
-
-    # Keep a reference on decoder so it stays discoverable after wrappers.
-    # Always refresh this reference to avoid stale nets from earlier runs.
     decoder._lycoris_net = lycoris_net
 
+    # IMPORTANT: LyCORIS preset/create_lycoris already handles target-module
+    # selection. Re-filtering by fragile name matching here can accidentally
+    # freeze valid LoKr tensors (e.g. lokr_w2_b), causing silent quality
+    # regression with many all-zero saved tensors.
     lokr_param_list = []
-    enabled_module_count = 0
-    disabled_module_count = 0
-    disabled_examples = []
-
-    for idx, module in enumerate(getattr(lycoris_net, "loras", []) or []):
-        module_name = (
-            getattr(module, "lora_name", None)
-            or getattr(module, "name", None)
-            or f"{module.__class__.__name__}#{idx}"
-        )
-        enabled = _matches_target_module_name(module_name, lokr_config.target_modules)
-
-        if enabled:
-            enabled_module_count += 1
-        else:
-            disabled_module_count += 1
-            if len(disabled_examples) < 8:
-                disabled_examples.append(module_name)
-
+    for module in getattr(lycoris_net, "loras", []) or []:
         for param in module.parameters():
-            param.requires_grad = enabled
-            if enabled:
-                lokr_param_list.append(param)
-
-    logger.info(
-        f"LoKr target filter: enabled {enabled_module_count} LyCORIS modules "
-        f"(disabled {disabled_module_count}) for targets={lokr_config.target_modules}"
-    )
-    if disabled_examples:
-        logger.info("LoKr disabled non-target modules (sample): " + ", ".join(disabled_examples))
+            param.requires_grad = True
+            lokr_param_list.append(param)
 
     if not lokr_param_list:
         for param in lycoris_net.parameters():
             param.requires_grad = True
             lokr_param_list.append(param)
 
-    # De-duplicate possible shared params.
     unique_params = {id(p): p for p in lokr_param_list}
     total_params = sum(p.numel() for p in model.parameters())
     lokr_params = sum(p.numel() for p in unique_params.values())
@@ -174,11 +145,20 @@ def inject_lokr_into_dit(
         "target_modules": lokr_config.target_modules,
     }
 
+
+    logger.info("LoKR injected into DiT decoder:")
+    logger.info(f"  Total parameters: {total_params:,}")
+    logger.info(f"  LoKR parameters: {lokr_params:,}")
+    logger.info(f"  Trainable parameters: {trainable_params:,} ({info['trainable_ratio']:.2%})")
+    logger.info(f"  linear_dim: {lokr_config.linear_dim}, linear_alpha: {lokr_config.linear_alpha}")
+    logger.info(f"  factor: {lokr_config.factor}, decompose_both: {lokr_config.decompose_both}")
+
     logger.info("LoKr injected into decoder")
     logger.info(
         f"LoKr trainable params: {trainable_params:,}/{total_params:,} "
         f"({info['trainable_ratio']:.2%})"
     )
+
     return model, lycoris_net, info
 
 
@@ -253,5 +233,118 @@ def save_lokr_training_checkpoint(
 
     state_path = os.path.join(output_dir, "training_state.pt")
     torch.save(state, state_path)
+
     logger.info(f"LoKr checkpoint saved to {output_dir} (epoch={epoch}, step={global_step})")
     return output_dir
+
+
+def load_lokr_training_checkpoint(
+    checkpoint_dir: str,
+    lycoris_net: Optional["LycorisNetwork"] = None,
+    optimizer=None,
+    scheduler=None,
+    device: torch.device = None,
+) -> Dict[str, Any]:
+    """Load LoKR training checkpoint.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoint files
+        lycoris_net: Optional LyCORIS network to load weights into
+        optimizer: Optimizer instance to load state into (optional)
+        scheduler: Scheduler instance to load state into (optional)
+        device: Device to load tensors to
+
+    Returns:
+        Dictionary with checkpoint info
+    """
+    result = {
+        "epoch": 0,
+        "global_step": 0,
+        "weights_path": None,
+        "loaded_optimizer": False,
+        "loaded_scheduler": False,
+        "lokr_config": None,
+    }
+
+    # Find weights file
+    weights_path = os.path.join(checkpoint_dir, "lokr_weights.safetensors")
+    if not os.path.exists(weights_path):
+        weights_path = os.path.join(checkpoint_dir, "lokr_weights.pt")
+    if os.path.exists(weights_path):
+        result["weights_path"] = weights_path
+        if lycoris_net is not None:
+            load_lokr_weights(lycoris_net, weights_path)
+
+    # Load training state
+    state_path = os.path.join(checkpoint_dir, "training_state.pt")
+    if os.path.exists(state_path):
+        map_location = device if device else "cpu"
+        training_state = torch.load(state_path, map_location=map_location)
+
+        result["epoch"] = training_state.get("epoch", 0)
+        result["global_step"] = training_state.get("global_step", 0)
+        result["lokr_config"] = training_state.get("lokr_config", None)
+
+        if optimizer is not None and "optimizer_state_dict" in training_state:
+            try:
+                optimizer.load_state_dict(training_state["optimizer_state_dict"])
+                result["loaded_optimizer"] = True
+                logger.info("Optimizer state loaded from LoKR checkpoint")
+            except Exception as e:
+                logger.warning(f"Failed to load optimizer state: {e}")
+
+        if scheduler is not None and "scheduler_state_dict" in training_state:
+            try:
+                scheduler.load_state_dict(training_state["scheduler_state_dict"])
+                result["loaded_scheduler"] = True
+                logger.info("Scheduler state loaded from LoKR checkpoint")
+            except Exception as e:
+                logger.warning(f"Failed to load scheduler state: {e}")
+
+        logger.info(f"Loaded LoKR checkpoint from epoch {result['epoch']}, step {result['global_step']}")
+    else:
+        import re
+        match = re.search(r'epoch_(\d+)', checkpoint_dir)
+        if match:
+            result["epoch"] = int(match.group(1))
+
+    return result
+
+
+def restore_lokr(lycoris_net: "LycorisNetwork") -> None:
+    """Remove LoKR adapters and restore the original model weights.
+
+    Args:
+        lycoris_net: The LyCORIS network wrapper to remove
+    """
+    if lycoris_net is not None:
+        lycoris_net.restore()
+        logger.info("LoKR adapters removed, original model restored")
+
+
+def get_lokr_info(lycoris_net: "LycorisNetwork") -> Dict[str, Any]:
+    """Get information about LoKR adapters.
+
+    Args:
+        lycoris_net: The LyCORIS network wrapper
+
+    Returns:
+        Dictionary with LoKR information
+    """
+    info = {
+        "has_lokr": False,
+        "lokr_params": 0,
+        "num_modules": 0,
+    }
+
+    if lycoris_net is None:
+        return info
+
+    lokr_params = sum(p.numel() for p in lycoris_net.parameters())
+    num_modules = len(list(lycoris_net.loras))
+
+    info["has_lokr"] = lokr_params > 0
+    info["lokr_params"] = lokr_params
+    info["num_modules"] = num_modules
+
+    return info

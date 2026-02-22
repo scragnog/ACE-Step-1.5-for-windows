@@ -271,6 +271,8 @@ Enter the save path for tensor files, click to start preprocessing, and wait for
 
 > The above values are for reference only. Please adjust based on your actual situation.
 
+> **💡 LoKr Recommendation:** LoKR has greatly improved training efficiency. What used to take an hour now only takes 5 minutes—over 10 times faster. This is crucial for training on consumer-grade GPUs. You can try LoKr training in the **Train LoKr** tab, or use the [Side-Step](https://github.com/koda-dernet/Side-Step) toolkit for CLI-based LoKr workflows. See the [Training Guide](../sidestep/Training%20Guide.md) for details.
+
 3. Click **Start Training** and wait for training to complete.
 
 ![](../pics/07_train.jpg)

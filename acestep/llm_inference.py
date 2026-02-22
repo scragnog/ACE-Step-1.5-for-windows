@@ -31,6 +31,16 @@ from acestep.gpu_config import get_lm_gpu_memory_ratio, get_gpu_memory_gb, get_l
 VRAM_SAFE_FREE_GB = 2.0
 
 
+def _is_tty(stream: object) -> bool:
+    try:
+        isatty = getattr(stream, "isatty", None)
+        if isatty is None:
+            return False
+        return bool(isatty())
+    except Exception:
+        return False
+
+
 def _warn_if_prerelease_python():
     v = sys.version_info
     if getattr(v, "releaselevel", "final") != "final" and sys.platform.startswith("linux"):
@@ -61,6 +71,7 @@ class LLMHandler:
         self.device = "cpu"
         self.dtype = torch.float32
         self.offload_to_cpu = False
+        self.last_init_params: Optional[Dict[str, Any]] = None
         self.disable_tqdm = os.environ.get("ACESTEP_DISABLE_TQDM", "").lower() in ("1", "true", "yes") or not (hasattr(sys.stderr, 'isatty') and sys.stderr.isatty())
 
         # HuggingFace Space persistent storage support
@@ -530,6 +541,15 @@ class LLMHandler:
                         f"[initialize] Overriding requested dtype {self.dtype} to float32 for LM on MPS."
                     )
                     self.dtype = torch.float32
+
+            self.last_init_params = {
+                "checkpoint_dir": checkpoint_dir,
+                "lm_model_path": lm_model_path,
+                "backend": backend,
+                "device": device,
+                "offload_to_cpu": offload_to_cpu,
+                "dtype": self.dtype,
+            }
 
             # If lm_model_path is None, use default
             if lm_model_path is None:

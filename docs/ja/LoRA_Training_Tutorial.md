@@ -271,6 +271,8 @@ Tensorファイルの保存パスを入力し、前処理を開始して完了�
 
 > 上記の数値は参考値です。実際の状況に応じて調整してください。
 
+> **💡 LoKr のおすすめ：** LoKR はトレーニング効率を大幅に向上させました。以前は1時間かかっていたトレーニングが、わずか5分で完了します——10倍以上の高速化です。これは消費者向けGPUでのトレーニングにとって非常に重要です。**Train LoKr** タブで LoKr トレーニングをお試しいただくか、[Side-Step](https://github.com/koda-dernet/Side-Step) ツールキットでCLIベースの LoKr ワークフローをご利用ください。詳細は [Training Guide](../sidestep/Training%20Guide.md) をご参照ください。
+
 3. **Start Training** をクリックし、トレーニングの完了を待ちます。
 
 ![](../pics/07_train.jpg)

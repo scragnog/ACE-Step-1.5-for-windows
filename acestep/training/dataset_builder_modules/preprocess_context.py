@@ -10,26 +10,33 @@ def build_context_latents(
 ):
     """Build context latents for text2music."""
     if src_latents is None:
-        src_latents = silence_latent[:, :latent_length, :].to(dtype)
+        src = silence_latent
+        if src.device != device:
+            src = src.to(device)
+        if src.dtype != dtype:
+            src = src.to(dtype)
     else:
-        if src_latents.dim() == 2:
-            src_latents = src_latents.unsqueeze(0)
-        src_latents = src_latents.to(device=device, dtype=dtype)
-    if src_latents.shape[0] < 1:
-        src_latents = src_latents.expand(1, -1, -1)
+        src = src_latents
+        if src.dim() == 2:
+            src = src.unsqueeze(0)
+        src = src.to(device=device, dtype=dtype)
+        if src.shape[0] < 1:
+            src = src.expand(1, -1, -1)
 
-    if src_latents.shape[1] < latent_length:
-        pad_len = latent_length - src_latents.shape[1]
-        src_latents = torch.cat(
-            [
-                src_latents,
-                silence_latent[:, :pad_len, :].expand(1, -1, -1).to(dtype),
-            ],
-            dim=1,
-        )
-    elif src_latents.shape[1] > latent_length:
-        src_latents = src_latents[:, :latent_length, :]
+    context_latents = torch.empty((1, latent_length, 128), device=device, dtype=dtype)
 
-    chunk_masks = torch.ones(1, latent_length, 64, device=device, dtype=dtype)
-    context_latents = torch.cat([src_latents, chunk_masks], dim=-1)
+    src_len = src.shape[1]
+    take = min(latent_length, src_len)
+    context_latents[:, :take, :64] = src[:, :take, :]
+
+    if take < latent_length:
+        remaining = latent_length - take
+        pad_src = src[:, :min(src_len, remaining), :]
+        while remaining > 0:
+            chunk = min(remaining, pad_src.shape[1])
+            context_latents[:, take : take + chunk, :64] = pad_src[:, :chunk, :]
+            take += chunk
+            remaining -= chunk
+
+    context_latents[:, :, 64:] = 1
     return context_latents

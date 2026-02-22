@@ -5,13 +5,13 @@ Contains dataclasses for LoRA and training configurations.
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
 class LoRAConfig:
     """Configuration for LoRA (Low-Rank Adaptation) training.
-    
+
     Attributes:
         r: LoRA rank (dimension of low-rank matrices)
         alpha: LoRA scaling factor (alpha/r determines the scaling)
@@ -26,7 +26,7 @@ class LoRAConfig:
         "q_proj", "k_proj", "v_proj", "o_proj"
     ])
     bias: str = "none"
-    
+
     def to_dict(self):
         """Convert to dictionary for PEFT config."""
         return {
@@ -78,13 +78,13 @@ class LoKRConfig:
 @dataclass
 class TrainingConfig:
     """Configuration for LoRA training process.
-    
+
     Training uses:
     - Device-aware mixed precision (bf16 on CUDA/XPU, fp16 on MPS, fp32 on CPU)
     - Discrete timesteps from turbo shift=3.0 schedule (8 steps)
     - Randomly samples one of 8 timesteps per training step:
       [1.0, 0.9545, 0.9, 0.8333, 0.75, 0.6429, 0.5, 0.3]
-    
+
     Attributes:
         shift: Timestep shift factor (fixed at 3.0 for turbo model)
         num_inference_steps: Number of inference steps (fixed at 8 for turbo)
@@ -116,19 +116,25 @@ class TrainingConfig:
     gradient_checkpointing: bool = False
     seed: int = 42
     output_dir: str = "./lora_output"
-    
+    use_fp8: bool = False  # Use FP8 quantization for decoder weights
+    gradient_checkpointing: bool = False  # Trade compute for memory savings
+
     # Data loading
     num_workers: int = 4
     pin_memory: bool = True
     prefetch_factor: int = 2
     persistent_workers: bool = True
     pin_memory_device: str = ""
-    
+    sample_cache_size: int = 32
+
     # Logging
     log_every_n_steps: int = 10
 
     # Validation (for loss curve and best-checkpoint tracking)
     val_split: float = 0.0
+
+    # Optional path to previously trained weights to resume from
+    network_weights: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.val_split < 1.0:
@@ -152,11 +158,15 @@ class TrainingConfig:
             "gradient_checkpointing": self.gradient_checkpointing,
             "seed": self.seed,
             "output_dir": self.output_dir,
+            "use_fp8": self.use_fp8,
+            "gradient_checkpointing": self.gradient_checkpointing,
             "num_workers": self.num_workers,
             "pin_memory": self.pin_memory,
             "prefetch_factor": self.prefetch_factor,
             "persistent_workers": self.persistent_workers,
             "pin_memory_device": self.pin_memory_device,
+            "sample_cache_size": self.sample_cache_size,
             "log_every_n_steps": self.log_every_n_steps,
             "val_split": self.val_split,
+            "network_weights": self.network_weights,
         }

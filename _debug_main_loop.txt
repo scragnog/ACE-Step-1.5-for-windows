@@ -1,0 +1,32 @@
+2001:                     encoder_attention_mask=encoder_attention_mask,
+2002:                     context_latents=context_latents,
+2003:                     use_cache=True,
+2004:                     past_key_values=past_key_values,
+2005:                 )
+2006: 
+2007:                 vt = decoder_outputs[0]
+2008:                 past_key_values = decoder_outputs[1]
+2009:                 apply_cfg_guidance = t_curr >= cfg_interval_start and t_curr <= cfg_interval_end
+2010:                 if do_cfg_guidance:
+2011:                     pred_cond, pred_null_cond = vt.chunk(2)
+2012:                     if apply_cfg_guidance:
+2013:                         dt_val = (t_curr - t_prev) if isinstance(t_prev, (int, float)) else float(t_curr - t_prev)
+2014:                         vt = guidance_fn(
+2015:                             pred_cond, pred_null_cond, diffusion_guidance_sale,
+2016:                             momentum_buffer=momentum_buffer,
+2017:                             latents=xt, sigma=t_curr,
+2018:                             dt=dt_val,
+2019:                             step_idx=step_idx, total_steps=infer_steps,
+2020:                         )
+2021:                     else:
+2022:                         vt = pred_cond
+2023: 
+2024:                 # Solver step
+2025:                 t_curr_f = t_curr.item() if isinstance(t_curr, torch.Tensor) else float(t_curr)
+2026:                 t_prev_f = t_prev.item() if isinstance(t_prev, torch.Tensor) else float(t_prev)
+2027:                 xt, solver_state = solver_fn(xt, vt, t_curr_f, t_prev_f, solver_state, model_fn=model_fn)
+2028: 
+2029:         x_gen = xt
+2030:         end_time = time.time()
+2031:         time_costs["diffusion_time_cost"] = end_time - start_time
+2032:         time_costs["diffusion_per_step_time_cost"] = time_costs["diffusion_time_cost"] / infer_steps

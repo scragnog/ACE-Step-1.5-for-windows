@@ -68,11 +68,15 @@ class ServiceGenerateExecuteMixin:
         audio_cover_strength: float,
         cover_noise_strength: float,
         infer_method: str,
-        use_adg: bool,
+        guidance_mode: str,
         cfg_interval_start: float,
         cfg_interval_end: float,
         shift: float,
         timesteps: Optional[List[float]],
+        use_pag: bool = False,
+        pag_start: float = 0.30,
+        pag_end: float = 0.80,
+        pag_scale: float = 0.2,
     ) -> Dict[str, Any]:
         """Build kwargs passed to model generation backends."""
         kwargs = {
@@ -95,10 +99,15 @@ class ServiceGenerateExecuteMixin:
             "infer_method": infer_method,
             "infer_steps": infer_steps,
             "diffusion_guidance_sale": guidance_scale,
-            "use_adg": use_adg,
+            "guidance_mode": guidance_mode,
             "cfg_interval_start": cfg_interval_start,
             "cfg_interval_end": cfg_interval_end,
             "shift": shift,
+            # PAG (Perturbed-Attention Guidance)
+            "use_pag": use_pag,
+            "pag_start": pag_start,
+            "pag_end": pag_end,
+            "pag_scale": pag_scale,
         }
         if timesteps is not None:
             kwargs["timesteps"] = torch.tensor(timesteps, dtype=torch.float32, device=self.device)
@@ -118,6 +127,17 @@ class ServiceGenerateExecuteMixin:
             "MLX (native)" if (self.use_mlx_dit and self.mlx_decoder is not None) else f"PyTorch ({self.device})"
         )
         logger.info(f"[service_generate] Generating audio... (DiT backend: {dit_backend})")
+        logger.info(
+            f"[service_generate] DiT diffusion via {dit_backend}... "
+            f"solver={generate_kwargs.get('infer_method', 'ode')}, "
+            f"guidance={generate_kwargs.get('guidance_mode', 'apg')}, "
+            f"steps={generate_kwargs.get('infer_steps')}, "
+            f"cfg_scale={generate_kwargs.get('diffusion_guidance_sale')}, "
+            f"seed={seed_param}, "
+            f"shift={shift}, "
+            f"cfg_interval=[{generate_kwargs.get('cfg_interval_start', 0.0)}, {generate_kwargs.get('cfg_interval_end', 1.0)}], "
+            f"cover_strength={audio_cover_strength}"
+        )
         with torch.inference_mode():
             with self._load_model_context("model"):
                 encoder_hidden_states, encoder_attention_mask, context_latents = self.model.prepare_condition(
