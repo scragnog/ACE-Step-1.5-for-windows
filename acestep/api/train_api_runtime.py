@@ -39,6 +39,7 @@ class RuntimeComponentManager:
 
         self.decoder_moved = False
         self.llm_unloaded = False
+        self._llm_restore_params: Optional[dict] = None
 
         self._decoder_prev_device: Optional[str] = None
         self._decoder_prev_dtype: Any = None
@@ -150,18 +151,78 @@ class RuntimeComponentManager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def offload_all_to_cpu(self, include_llm: bool = False) -> bool:
+        """Offload all model components to CPU and flush GPU cache.
+
+        Temporarily sets ``handler.offload_to_cpu = True`` so that
+        ``_load_model_context`` will reload components on demand later.
+        The caller **must** restore the returned previous flag value in
+        a ``finally`` block via ``handler.offload_to_cpu = prev``.
+
+        Args:
+            include_llm: Also unload the LLM handler.
+
+        Returns:
+            Previous value of ``handler.offload_to_cpu``.
+        """
+        prev = getattr(self.handler, "offload_to_cpu", False)
+        self.handler.offload_to_cpu = True
+        self.offload_decoder_to_cpu()
+        self.offload_vae_to_cpu()
+        self.offload_text_encoder_to_cpu()
+        self.offload_model_encoder_to_cpu()
+        self.offload_model_tokenizer_to_cpu()
+        self.offload_model_detokenizer_to_cpu()
+        if include_llm:
+            self.unload_llm()
+        self.flush_gpu_cache()
+        return prev
+
     def unload_llm(self) -> None:
-        """Unload LLM to release VRAM and mark state flags."""
+        """Unload LLM to release VRAM and mark state flags.
+
+        Saves ``last_init_params`` so that :meth:`restore` can reinitialize
+        the *original* model even if the LLM is re-initialized with
+        different params in between.
+        """
 
         if self.llm is None or not getattr(self.llm, "llm_initialized", False):
             return
         try:
+            params = getattr(self.llm, "last_init_params", None)
+            if isinstance(params, dict) and params:
+                self._llm_restore_params = dict(params)
             self.llm.unload()
             self.llm_unloaded = True
             self.app_state._llm_initialized = False
             self.app_state._llm_init_error = None
         except Exception:
             logger.exception("Failed to unload LLM for temporary offload")
+
+    def init_llm(self, lm_model_path: Optional[str] = None) -> bool:
+        """Initialize (or re-initialize) the LLM, optionally with a different model.
+
+        Uses the saved restore params as base, overriding ``lm_model_path``
+        when provided.  Returns True on success.
+        """
+
+        if self.llm is None:
+            return False
+        params = dict(self._llm_restore_params) if self._llm_restore_params else {}
+        if not params:
+            return False
+        if lm_model_path and lm_model_path.strip():
+            params["lm_model_path"] = lm_model_path.strip()
+        try:
+            status, ok = self.llm.initialize(**params)
+            self.app_state._llm_initialized = bool(ok)
+            self.app_state._llm_init_error = None if ok else status
+            return bool(ok)
+        except Exception as exc:
+            self.app_state._llm_initialized = False
+            self.app_state._llm_init_error = str(exc)
+            logger.exception("Failed to initialize LLM")
+            return False
 
     def restore(self) -> None:
         """Restore previously offloaded components back to their original state."""
@@ -193,12 +254,20 @@ class RuntimeComponentManager:
                 logger.exception("Failed to restore module from temporary offload")
 
         if self.llm_unloaded and self.llm is not None:
-            params = getattr(self.llm, "last_init_params", None)
-            if isinstance(params, dict) and params:
+            current_params = getattr(self.llm, "last_init_params", None)
+            restore_params = self._llm_restore_params or (
+                current_params if isinstance(current_params, dict) else None
+            )
+            if restore_params:
                 try:
-                    status, ok = self.llm.initialize(**params)
-                    self.app_state._llm_initialized = bool(ok)
-                    self.app_state._llm_init_error = None if ok else status
+                    if not getattr(self.llm, "llm_initialized", False):
+                        status, ok = self.llm.initialize(**restore_params)
+                        self.app_state._llm_initialized = bool(ok)
+                        self.app_state._llm_init_error = None if ok else status
+                    elif isinstance(current_params, dict) and current_params.get("lm_model_path") != restore_params.get("lm_model_path"):
+                        status, ok = self.llm.initialize(**restore_params)
+                        self.app_state._llm_initialized = bool(ok)
+                        self.app_state._llm_init_error = None if ok else status
                 except Exception as exc:
                     self.app_state._llm_initialized = False
                     self.app_state._llm_init_error = str(exc)

@@ -24,7 +24,7 @@ from .service_init import (
     on_tier_change,
 )
 from .model_config import (
-    _is_pure_base_model,
+    is_pure_base_model,
     update_model_type_settings,
     get_ui_control_config,
     get_model_type_ui_settings,

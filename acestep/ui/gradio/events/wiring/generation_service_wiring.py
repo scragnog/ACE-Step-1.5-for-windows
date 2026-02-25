@@ -9,6 +9,7 @@ from typing import Any
 import gradio as gr
 
 from .. import generation_handlers as gen_h
+from ...i18n import get_i18n
 from .context import (
     GenerationWiringContext,
     build_auto_checkbox_inputs,
@@ -39,6 +40,12 @@ def register_generation_service_handlers(
     generation_section["refresh_btn"].click(
         fn=lambda: gen_h.refresh_checkpoints(dit_handler),
         outputs=[generation_section["checkpoint_dropdown"]],
+    )
+
+    generation_section["language_dropdown"].change(
+        fn=lambda language: _apply_runtime_language(language),
+        inputs=[generation_section["language_dropdown"]],
+        outputs=[generation_section["language_dropdown"]],
     )
 
     generation_section["config_path"].change(
@@ -189,3 +196,17 @@ def register_generation_service_handlers(
     )
 
     return auto_checkbox_inputs, auto_checkbox_outputs
+
+
+def _apply_runtime_language(language: str) -> dict[str, Any]:
+    """Update global i18n language for runtime-generated messages.
+
+    Args:
+        language: Selected UI language code from the language dropdown.
+
+    Returns:
+        A ``gr.update`` payload preserving the selected dropdown value.
+    """
+
+    get_i18n(language)
+    return gr.update(value=language)

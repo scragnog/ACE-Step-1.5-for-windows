@@ -74,8 +74,12 @@ class IoAudioMixin:
             return None
 
         try:
-            import torchaudio
-            audio, sr = torchaudio.load(audio_file)
+            import soundfile as sf
+            audio_np, sr = sf.read(audio_file, dtype="float32")
+            if audio_np.ndim == 1:
+                audio = torch.from_numpy(audio_np).unsqueeze(0)
+            else:
+                audio = torch.from_numpy(audio_np.T)
             logger.debug(f"[process_reference_audio] Reference audio shape: {audio.shape}")
             logger.debug(f"[process_reference_audio] Reference audio sample rate: {sr}")
             logger.debug(
@@ -125,8 +129,12 @@ class IoAudioMixin:
             return None
 
         try:
-            import torchaudio
-            audio, sr = torchaudio.load(audio_file)
+            import soundfile as sf
+            audio_np, sr = sf.read(audio_file, dtype="float32")
+            if audio_np.ndim == 1:
+                audio = torch.from_numpy(audio_np).unsqueeze(0)
+            else:
+                audio = torch.from_numpy(audio_np.T)
             return self._normalize_audio_to_stereo_48k(audio, sr)
         except (OSError, RuntimeError, ValueError):
             logger.exception("[process_src_audio] Error processing source audio")

@@ -41,6 +41,8 @@ class GenerateMusicMixin:
         instruction: str = DEFAULT_DIT_INSTRUCTION,
         audio_cover_strength: float = 1.0,
         cover_noise_strength: float = 0.0,
+        tempo_scale: float = 1.0,
+        pitch_shift: int = 0,
         task_type: str = "text2music",
         use_adg: bool = False,
         guidance_mode: str = "",
@@ -141,6 +143,8 @@ class GenerateMusicMixin:
                 audio_code_string=audio_code_string,
                 actual_batch_size=actual_batch_size,
                 task_type=task_type,
+                tempo_scale=tempo_scale,
+                pitch_shift=pitch_shift,
             )
             if audio_error is not None:
                 return audio_error

@@ -3,7 +3,12 @@
     "title": "🎛️ סביבת העבודה ACE-Step V1.5 Playground💡",
     "subtitle": "פורצים את גבולות יצירת המוזיקה בקוד פתוח"
   },
-  "common": {},
+  "common": {
+    "language_metadata": {
+    "name": "Hebrew",
+    "native_name": "עברית"
+    }
+  },
   "dataset": {
     "title": "📊 סייר מערכי נתונים (Dataset Explorer)",
     "dataset_label": "מערך נתונים",
@@ -43,6 +48,7 @@
     "backend_info": "בחר מנוע עבור 5Hz LM: vllm (מהיר יותר) או pt (PyTorch, תואם יותר).",
     "init_llm_label": "אתחול 5Hz LM",
     "init_llm_info": "סמן כדי לאתחל את ה-5Hz LM במהלך אתחול השירות.",
+    "lm_unavailable_vram": "⚠️ LM אינו זמין עבור דרגת GPU זו (VRAM נמוך מדי)",
     "flash_attention_label": "השתמש ב-Flash Attention",
     "flash_attention_info_enabled": "הפעל Flash Attention להסקה מהירה יותר (דורש חבילת flash_attn)",
     "flash_attention_info_disabled": "Flash Attention אינו זמין (חבילת flash_attn לא מותקנת)",

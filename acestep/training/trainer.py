@@ -466,7 +466,6 @@ class PreprocessedLoRAModule(nn.Module):
             else:
                 logger.warning("Gradient checkpointing requested but could not be enabled for decoder")
 
-
         # torch.compile: optional perf optimization.
         # PEFT LoRA wraps the decoder in PeftModelForFeatureExtraction which is
         # incompatible with torch.compile/inductor on PyTorch 2.7.x

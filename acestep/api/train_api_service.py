@@ -22,7 +22,6 @@ def register_training_api_routes(
     wrap_response: Callable[[Any, int, Optional[str]], Dict[str, Any]],
     start_tensorboard: Callable[[FastAPI, str], Optional[str]],
     stop_tensorboard: Callable[[FastAPI], None],
-    temporary_llm_model: Callable[[FastAPI, Any, Optional[str]], Any],
     atomic_write_json: Callable[[str, Dict[str, Any]], None],
     append_jsonl: Callable[[str, Dict[str, Any]], None],
 ) -> None:
@@ -44,7 +43,6 @@ def register_training_api_routes(
         app=app,
         verify_api_key=verify_api_key,
         wrap_response=wrap_response,
-        temporary_llm_model=temporary_llm_model,
         atomic_write_json=atomic_write_json,
         append_jsonl=append_jsonl,
     )

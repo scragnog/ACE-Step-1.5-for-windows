@@ -46,6 +46,12 @@ Quit button in the sidebar gracefully shuts down all processes (Python API, Vite
 ### 📋 JSON Export & Import
 Export all generation parameters to a shareable `.json` file and import them later to reproduce exact configurations. Includes full adapter slot details, steering concepts, and all expert parameters in the Generation Parameters sidebar.
 
+### 🎼 Stem Extraction (Extract Mode)
+Isolate individual stems from any audio file using ACE-Step's generative extract task. Select multiple tracks (Vocals, Bass, Guitar, Drums, etc.) and each queues a separate job. Three quality presets (Low/Medium/High) configure optimal solver and step combinations. Optional **Style Hint** guides timbre (e.g., "distorted electric guitar") and **Lyrics Guidance** improves vocal extraction accuracy. Stale metadata is automatically cleared to prevent interference.
+
+### 🎚️ Tempo Scale & Pitch Shift (Cover Mode)
+Pre-process source audio before generation with two independent controls: **Tempo Scale** (0.5x–2.0x) changes speed without affecting pitch using phase vocoder, and **Pitch Shift** (-12 to +12 semitones) transposes the key without changing speed. Perfect for making a male vocal track work in a female range (+3–5 semitones) or adjusting cover tempo independently from melody. Both can be combined simultaneously.
+
 ---
 
 ## Upstream Features

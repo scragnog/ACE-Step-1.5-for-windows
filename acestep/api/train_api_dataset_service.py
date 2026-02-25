@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -16,6 +17,18 @@ from acestep.api import train_api_models
 from acestep.api.train_api_runtime import RuntimeComponentManager
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
+
+
+def _derive_jsonl_path(save_path: str, suffix: str) -> str:
+    """Derive a .jsonl sidecar path from the dataset JSON save path.
+
+    Strips the ``.json`` extension (if present) before appending *suffix*.
+    Example: ``my_lora_dataset.json`` + ``_autolabel`` → ``my_lora_dataset_autolabel.jsonl``
+    """
+    base, ext = os.path.splitext(save_path)
+    if ext.lower() == ".json":
+        return f"{base}{suffix}.jsonl"
+    return f"{save_path}{suffix}.jsonl"
 
 
 class ScanDirectoryRequest(BaseModel):
@@ -110,6 +123,23 @@ class PreprocessDatasetRequest(BaseModel):
     skip_existing: bool = Field(default=False, description="Skip tensors that already exist (by sample id filename)")
 
 
+class TranscribeRequest(BaseModel):
+    """Request payload for lyrics transcription."""
+
+    model_path: str = Field(
+        default="ACE-Step/acestep-transcriber",
+        description="HuggingFace model ID or local path for the transcriber",
+    )
+    force_all: bool = Field(
+        default=False,
+        description="Transcribe all samples including those marked instrumental",
+    )
+    return_instrumental_lyrics: bool = Field(
+        default=False,
+        description="Keep raw lyrics content for instrumental tracks instead of replacing with [Instrumental]",
+    )
+
+
 def _serialize_samples(builder: Any) -> list[Dict[str, Any]]:
     """Return stable sample payload list for dataset endpoints."""
 
@@ -138,7 +168,6 @@ def register_training_dataset_routes(
     app: FastAPI,
     verify_api_key: Callable[..., Any],
     wrap_response: Callable[[Any, int, Optional[str]], Dict[str, Any]],
-    temporary_llm_model: Callable[[FastAPI, LLMHandler, Optional[str]], Any],
     atomic_write_json: Callable[[str, Dict[str, Any]], None],
     append_jsonl: Callable[[str, Dict[str, Any]], None],
 ) -> None:
@@ -203,6 +232,7 @@ def register_training_dataset_routes(
                 )
 
             app.state.dataset_builder = builder
+            app.state.dataset_json_path = os.path.normpath(request.dataset_path.strip())
 
             return wrap_response(
                 {
@@ -246,75 +276,87 @@ def register_training_dataset_routes(
 
         mgr = RuntimeComponentManager(handler=handler, llm=llm, app_state=app.state)
         mgr.offload_decoder_to_cpu()
+        mgr.offload_text_encoder_to_cpu()
+        mgr.offload_model_encoder_to_cpu()
+        mgr.offload_model_detokenizer_to_cpu()
+        mgr.unload_llm()
+        mgr.flush_gpu_cache()
 
         try:
-            with temporary_llm_model(app, llm, request.lm_model_path):
-                resolved_save_path = (request.save_path.strip() if request.save_path else None) or getattr(
-                    app.state,
-                    "dataset_json_path",
-                    None,
-                )
-                resolved_save_path = os.path.normpath(resolved_save_path) if resolved_save_path else None
-                resolved_jsonl_path = f"{resolved_save_path}.autolabel.jsonl" if resolved_save_path else None
+            resolved_save_path = (request.save_path.strip() if request.save_path else None) or getattr(
+                app.state,
+                "dataset_json_path",
+                None,
+            )
+            resolved_save_path = os.path.normpath(resolved_save_path) if resolved_save_path else None
+            resolved_jsonl_path = _derive_jsonl_path(resolved_save_path, "_autolabel") if resolved_save_path else None
 
-                if resolved_save_path:
-                    try:
-                        dataset = {
-                            "metadata": builder.metadata.to_dict(),
-                            "samples": [sample.to_dict() for sample in builder.samples],
-                        }
-                        atomic_write_json(resolved_save_path, dataset)
-                    except Exception:
-                        logger.exception("Auto-label initial save failed")
-
-                def sample_labeled_callback(sample_idx: int, sample: Any, status: str):
-                    if resolved_save_path is None:
-                        return
-                    if "✅" not in status:
-                        return
-
-                    try:
-                        if resolved_jsonl_path is not None:
-                            append_jsonl(
-                                resolved_jsonl_path,
-                                {
-                                    "ts": time.time(),
-                                    "index": sample_idx,
-                                    "status": status,
-                                    "sample": sample.to_dict(),
-                                },
-                            )
-                        dataset = {
-                            "metadata": builder.metadata.to_dict(),
-                            "samples": [sample.to_dict() for sample in builder.samples],
-                        }
-                        atomic_write_json(resolved_save_path, dataset)
-                    except Exception:
-                        logger.exception("Auto-label incremental save failed")
-
-                _samples, status = builder.label_all_samples(
-                    dit_handler=handler,
-                    llm_handler=llm,
-                    format_lyrics=request.format_lyrics,
-                    transcribe_lyrics=request.transcribe_lyrics,
-                    skip_metas=request.skip_metas,
-                    only_unlabeled=request.only_unlabeled,
-                    chunk_size=request.chunk_size,
-                    batch_size=request.batch_size,
-                    progress_callback=None,
-                    sample_labeled_callback=sample_labeled_callback,
-                )
-
-                if mgr.decoder_moved:
-                    status += "\nℹ️ Decoder was temporarily offloaded during labeling and restored afterward."
-
-                return wrap_response(
-                    {
-                        "message": status,
-                        "labeled_count": builder.get_labeled_count(),
-                        "samples": _serialize_samples(builder),
+            if resolved_save_path:
+                try:
+                    dataset = {
+                        "metadata": builder.metadata.to_dict(),
+                        "samples": [sample.to_dict() for sample in builder.samples],
                     }
-                )
+                    atomic_write_json(resolved_save_path, dataset)
+                except Exception:
+                    logger.exception("Auto-label initial save failed")
+
+            def sample_labeled_callback(sample_idx: int, sample: Any, status: str):
+                if resolved_save_path is None:
+                    return
+                if "✅" not in status:
+                    return
+
+                try:
+                    if resolved_jsonl_path is not None:
+                        append_jsonl(
+                            resolved_jsonl_path,
+                            {
+                                "ts": time.time(),
+                                "index": sample_idx,
+                                "status": status,
+                                "sample": sample.to_dict(),
+                            },
+                        )
+                    dataset = {
+                        "metadata": builder.metadata.to_dict(),
+                        "samples": [sample.to_dict() for sample in builder.samples],
+                    }
+                    atomic_write_json(resolved_save_path, dataset)
+                except Exception:
+                    logger.exception("Auto-label incremental save failed")
+
+            def _after_phase(phase: int) -> None:
+                if phase == 1:
+                    mgr.offload_vae_to_cpu()
+                    mgr.offload_model_tokenizer_to_cpu()
+                    mgr.flush_gpu_cache()
+                    mgr.init_llm(request.lm_model_path)
+
+            _samples, status = builder.label_all_samples(
+                dit_handler=handler,
+                llm_handler=llm,
+                format_lyrics=request.format_lyrics,
+                transcribe_lyrics=request.transcribe_lyrics,
+                skip_metas=request.skip_metas,
+                only_unlabeled=request.only_unlabeled,
+                chunk_size=request.chunk_size,
+                batch_size=request.batch_size,
+                progress_callback=None,
+                sample_labeled_callback=sample_labeled_callback,
+                on_phase_complete=_after_phase,
+            )
+
+            if mgr.decoder_moved:
+                status += "\nℹ️ Decoder was temporarily offloaded during labeling and restored afterward."
+
+            return wrap_response(
+                {
+                    "message": status,
+                    "labeled_count": builder.get_labeled_count(),
+                    "samples": _serialize_samples(builder),
+                }
+            )
         except Exception as exc:
             return wrap_response(None, code=500, error=f"Auto-label failed: {exc}")
         finally:
@@ -391,90 +433,102 @@ def register_training_dataset_routes(
         def run_labeling() -> None:
             mgr = RuntimeComponentManager(handler=handler, llm=llm, app_state=app.state)
             mgr.offload_decoder_to_cpu()
+            mgr.offload_text_encoder_to_cpu()
+            mgr.offload_model_encoder_to_cpu()
+            mgr.offload_model_detokenizer_to_cpu()
+            mgr.unload_llm()
+            mgr.flush_gpu_cache()
 
             try:
-                with temporary_llm_model(app, llm, request.lm_model_path):
-                    def progress_callback(msg: str):
-                        with train_api_models._auto_label_lock:
-                            task = train_api_models._auto_label_tasks.get(task_id)
-                            if task:
-                                task.progress = msg
-                                task.updated_at = time.time()
-                                import re
+                def progress_callback(msg: str):
+                    with train_api_models._auto_label_lock:
+                        task = train_api_models._auto_label_tasks.get(task_id)
+                        if task:
+                            task.progress = msg
+                            task.updated_at = time.time()
+                            import re
 
-                                match = re.match(r"^(?:VAE encoding|Tokenizing|Labeling|Encoding) (\d+)/(\d+)", msg)
-                                if match:
-                                    task.current = int(match.group(1))
-                                    task.total = int(match.group(2))
+                            match = re.match(r"^(?:VAE encoding|Tokenizing|Labeling|Encoding) (\d+)/(\d+)", msg)
+                            if match:
+                                task.current = int(match.group(1))
+                                task.total = int(match.group(2))
 
-                    resolved_jsonl_path = f"{resolved_save_path}.autolabel.jsonl" if resolved_save_path else None
+                resolved_jsonl_path = _derive_jsonl_path(resolved_save_path, "_autolabel") if resolved_save_path else None
 
-                    def sample_labeled_callback(sample_idx: int, sample: Any, status: str):
-                        if "✅" not in status:
-                            return
-
-                        with train_api_models._auto_label_lock:
-                            task = train_api_models._auto_label_tasks.get(task_id)
-                            if task:
-                                task.progress = status
-                                task.last_updated_index = sample_idx
-                                task.last_updated_sample = sample.to_dict()
-                                task.updated_at = time.time()
-
-                        if resolved_save_path is None:
-                            return
-                        try:
-                            if resolved_jsonl_path is not None:
-                                append_jsonl(
-                                    resolved_jsonl_path,
-                                    {
-                                        "ts": time.time(),
-                                        "index": sample_idx,
-                                        "status": status,
-                                        "sample": sample.to_dict(),
-                                    },
-                                )
-                            dataset = {
-                                "metadata": builder.metadata.to_dict(),
-                                "samples": [sample.to_dict() for sample in builder.samples],
-                            }
-                            atomic_write_json(resolved_save_path, dataset)
-                        except Exception:
-                            logger.exception("Auto-label incremental save failed")
-                            with train_api_models._auto_label_lock:
-                                task = train_api_models._auto_label_tasks.get(task_id)
-                                if task:
-                                    task.progress = "⚠️ Auto-label incremental save failed (see server logs)"
-                                    task.updated_at = time.time()
-
-                    _samples, status = builder.label_all_samples(
-                        dit_handler=handler,
-                        llm_handler=llm,
-                        format_lyrics=request.format_lyrics,
-                        transcribe_lyrics=request.transcribe_lyrics,
-                        skip_metas=request.skip_metas,
-                        only_unlabeled=request.only_unlabeled,
-                        chunk_size=request.chunk_size,
-                        batch_size=request.batch_size,
-                        progress_callback=progress_callback,
-                        sample_labeled_callback=sample_labeled_callback,
-                    )
-
-                    if mgr.decoder_moved:
-                        status += "\nℹ️ Decoder was temporarily offloaded during labeling and restored afterward."
+                def sample_labeled_callback(sample_idx: int, sample: Any, status: str):
+                    if "✅" not in status:
+                        return
 
                     with train_api_models._auto_label_lock:
                         task = train_api_models._auto_label_tasks.get(task_id)
                         if task:
-                            task.status = "completed"
                             task.progress = status
-                            task.current = task.total
+                            task.last_updated_index = sample_idx
+                            task.last_updated_sample = sample.to_dict()
                             task.updated_at = time.time()
-                            task.result = {
-                                "message": status,
-                                "labeled_count": builder.get_labeled_count(),
-                                "samples": _serialize_samples(builder),
-                            }
+
+                    if resolved_save_path is None:
+                        return
+                    try:
+                        if resolved_jsonl_path is not None:
+                            append_jsonl(
+                                resolved_jsonl_path,
+                                {
+                                    "ts": time.time(),
+                                    "index": sample_idx,
+                                    "status": status,
+                                    "sample": sample.to_dict(),
+                                },
+                            )
+                        dataset = {
+                            "metadata": builder.metadata.to_dict(),
+                            "samples": [sample.to_dict() for sample in builder.samples],
+                        }
+                        atomic_write_json(resolved_save_path, dataset)
+                    except Exception:
+                        logger.exception("Auto-label incremental save failed")
+                        with train_api_models._auto_label_lock:
+                            task = train_api_models._auto_label_tasks.get(task_id)
+                            if task:
+                                task.progress = "⚠️ Auto-label incremental save failed (see server logs)"
+                                task.updated_at = time.time()
+
+                def _after_phase(phase: int) -> None:
+                    if phase == 1:
+                        mgr.offload_vae_to_cpu()
+                        mgr.offload_model_tokenizer_to_cpu()
+                        mgr.flush_gpu_cache()
+                        mgr.init_llm(request.lm_model_path)
+
+                _samples, status = builder.label_all_samples(
+                    dit_handler=handler,
+                    llm_handler=llm,
+                    format_lyrics=request.format_lyrics,
+                    transcribe_lyrics=request.transcribe_lyrics,
+                    skip_metas=request.skip_metas,
+                    only_unlabeled=request.only_unlabeled,
+                    chunk_size=request.chunk_size,
+                    batch_size=request.batch_size,
+                    progress_callback=progress_callback,
+                    sample_labeled_callback=sample_labeled_callback,
+                    on_phase_complete=_after_phase,
+                )
+
+                if mgr.decoder_moved:
+                    status += "\nℹ️ Decoder was temporarily offloaded during labeling and restored afterward."
+
+                with train_api_models._auto_label_lock:
+                    task = train_api_models._auto_label_tasks.get(task_id)
+                    if task:
+                        task.status = "completed"
+                        task.progress = status
+                        task.current = task.total
+                        task.updated_at = time.time()
+                        task.result = {
+                            "message": status,
+                            "labeled_count": builder.get_labeled_count(),
+                            "samples": _serialize_samples(builder),
+                        }
             except Exception as exc:
                 with train_api_models._auto_label_lock:
                     task = train_api_models._auto_label_tasks.get(task_id)
@@ -485,8 +539,6 @@ def register_training_dataset_routes(
                         task.updated_at = time.time()
             finally:
                 mgr.restore()
-
-        import threading
 
         thread = threading.Thread(target=run_labeling, daemon=True)
         thread.start()
@@ -781,8 +833,6 @@ def register_training_dataset_routes(
             finally:
                 mgr.restore()
 
-        import threading
-
         thread = threading.Thread(target=run_preprocessing, daemon=True)
         thread.start()
 
@@ -881,3 +931,212 @@ def register_training_dataset_routes(
             return wrap_response(None, code=400, error=status)
         except Exception as exc:
             return wrap_response(None, code=500, error=f"Update failed: {exc}")
+
+    # ── Lyrics transcription ────────────────────────────────────────────
+
+    @app.post("/v1/dataset/transcribe")
+    async def transcribe_lyrics(request: TranscribeRequest, _: None = Depends(verify_api_key)):
+        """Start async lyrics transcription for non-instrumental samples."""
+
+        builder = app.state.dataset_builder
+        if builder is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+
+        if not builder.samples:
+            raise HTTPException(status_code=400, detail="Dataset has no samples")
+
+        if not request.force_all and builder.metadata.all_instrumental:
+            return wrap_response(
+                None,
+                code=400,
+                error="All samples marked as instrumental. Uncheck 'All Instrumental' or use force_all=true.",
+            )
+
+        candidates: List[int] = []
+        for i, sample in enumerate(builder.samples):
+            if request.force_all or not sample.is_instrumental:
+                candidates.append(i)
+
+        if not candidates:
+            return wrap_response(
+                None,
+                code=400,
+                error="No samples to transcribe. All samples are marked as instrumental.",
+            )
+
+        resolved_save_path = getattr(app.state, "dataset_json_path", None)
+        resolved_save_path = os.path.normpath(resolved_save_path) if resolved_save_path else None
+        resolved_jsonl_path = _derive_jsonl_path(resolved_save_path, "_autotranscribe") if resolved_save_path else None
+        logger.info(
+            "Transcribe incremental save paths: json={}, jsonl={}",
+            resolved_save_path, resolved_jsonl_path,
+        )
+
+        task_id = str(uuid4())
+        with train_api_models._transcribe_lock:
+            train_api_models._transcribe_tasks[task_id] = train_api_models.TranscribeTask(
+                task_id=task_id,
+                status="running",
+                progress="Loading transcriber model...",
+                current=0,
+                total=len(candidates),
+                created_at=time.time(),
+                updated_at=time.time(),
+                save_path=resolved_save_path,
+            )
+            train_api_models._transcribe_latest_task_id = task_id
+
+        def run_transcription() -> None:
+            import gc
+
+            import torch
+
+            from acestep.training.dataset_builder_modules.transcribe_core import (
+                load_transcriber,
+                transcribe_samples,
+            )
+
+            handler: AceStepHandler = app.state.handler
+            llm = getattr(app.state, "llm_handler", None)
+            mgr = RuntimeComponentManager(handler=handler, llm=llm, app_state=app.state)
+
+            transcriber_model = None
+            transcriber_processor = None
+            prev_offload = mgr.offload_all_to_cpu(include_llm=True)
+            try:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                transcriber_model, transcriber_processor = load_transcriber(
+                    request.model_path, device=device
+                )
+
+                def on_progress(current, total, ok, inst, err):
+                    with train_api_models._transcribe_lock:
+                        t = train_api_models._transcribe_tasks.get(task_id)
+                        if t:
+                            t.current = current
+                            t.progress = (
+                                f"Transcribing {current}/{total} "
+                                f"(✅{ok} 🎵{inst} ❌{err})"
+                            )
+                            t.updated_at = time.time()
+
+                def sample_transcribed_callback(sample_idx: int, sample: Any) -> None:
+                    with train_api_models._transcribe_lock:
+                        t = train_api_models._transcribe_tasks.get(task_id)
+                        if t:
+                            t.last_updated_index = sample_idx
+                            t.last_updated_sample = sample.to_dict()
+                            t.updated_at = time.time()
+
+                    if resolved_save_path is None:
+                        return
+                    try:
+                        if resolved_jsonl_path is not None:
+                            append_jsonl(
+                                resolved_jsonl_path,
+                                {
+                                    "ts": time.time(),
+                                    "index": sample_idx,
+                                    "sample": sample.to_dict(),
+                                },
+                            )
+                        dataset = {
+                            "metadata": builder.metadata.to_dict(),
+                            "samples": [s.to_dict() for s in builder.samples],
+                        }
+                        atomic_write_json(resolved_save_path, dataset)
+                    except Exception:
+                        logger.exception("Transcribe incremental save failed")
+
+                counts = transcribe_samples(
+                    transcriber_model,
+                    transcriber_processor,
+                    builder.samples,
+                    candidates,
+                    force_all=request.force_all,
+                    return_instrumental_lyrics=request.return_instrumental_lyrics,
+                    progress_callback=on_progress,
+                    sample_callback=sample_transcribed_callback,
+                )
+                transcribed = counts["transcribed"]
+                skipped = counts["instrumental"]
+                errors = counts["errors"]
+
+                status_msg = (
+                    f"✅ Transcription complete: {transcribed} transcribed, "
+                    f"{skipped} instrumental, {errors} errors"
+                )
+                with train_api_models._transcribe_lock:
+                    task = train_api_models._transcribe_tasks.get(task_id)
+                    if task:
+                        task.status = "completed"
+                        task.progress = status_msg
+                        task.current = task.total
+                        task.updated_at = time.time()
+                        task.result = {
+                            "message": status_msg,
+                            "transcribed": transcribed,
+                            "instrumental": skipped,
+                            "errors": errors,
+                        }
+
+            except Exception as exc:
+                logger.exception("Transcription task failed")
+                with train_api_models._transcribe_lock:
+                    task = train_api_models._transcribe_tasks.get(task_id)
+                    if task:
+                        task.status = "failed"
+                        task.error = str(exc)
+                        task.progress = f"Failed: {exc}"
+                        task.updated_at = time.time()
+            finally:
+                del transcriber_model
+                del transcriber_processor
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                handler.offload_to_cpu = prev_offload
+                mgr.restore()
+
+        thread = threading.Thread(target=run_transcription, daemon=True)
+        thread.start()
+
+        return wrap_response(
+            {
+                "task_id": task_id,
+                "message": "Transcription task started",
+                "total": len(candidates),
+            }
+        )
+
+    @app.get("/v1/dataset/transcribe_status")
+    async def get_transcribe_status_latest(_: None = Depends(verify_api_key)):
+        """Get latest transcription task status."""
+
+        with train_api_models._transcribe_lock:
+            latest_id = train_api_models._transcribe_latest_task_id
+            if latest_id is None:
+                return wrap_response(
+                    {"task_id": None, "status": "idle", "progress": "", "current": 0, "total": 0}
+                )
+            task = train_api_models._transcribe_tasks.get(latest_id)
+            if task is None:
+                return wrap_response(
+                    {"task_id": latest_id, "status": "idle", "progress": "", "current": 0, "total": 0}
+                )
+
+            data: Dict[str, Any] = {
+                "task_id": task.task_id,
+                "status": task.status,
+                "progress": task.progress,
+                "current": task.current,
+                "total": task.total,
+                "save_path": task.save_path,
+                "last_updated_index": task.last_updated_index,
+                "last_updated_sample": task.last_updated_sample,
+            }
+            if task.status == "completed" and task.result:
+                data["result"] = task.result
+            elif task.status == "failed" and task.error:
+                data["error"] = task.error
+            return wrap_response(data)

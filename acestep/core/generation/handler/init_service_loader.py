@@ -1,5 +1,6 @@
 """Checkpoint and model-loading helpers for service initialization."""
 
+import gc
 import os
 from typing import Optional
 
@@ -29,6 +30,7 @@ class InitServiceLoaderMixin:
             if getattr(self, "model", None) is not None:
                 del self.model
                 self.model = None
+            gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 

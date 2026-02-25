@@ -25,7 +25,7 @@ from .generation.service_init import (  # noqa: F401
     on_tier_change,
 )
 from .generation.model_config import (  # noqa: F401
-    _is_pure_base_model,
+    is_pure_base_model,
     update_model_type_settings,
     get_ui_control_config,
     get_model_type_ui_settings,

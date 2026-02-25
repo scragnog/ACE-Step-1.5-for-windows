@@ -380,6 +380,13 @@ PARAM_ALIASES = {
     "seed": ["seed"],
 
     "audio_cover_strength": ["audio_cover_strength", "audioCoverStrength"],
+    "cover_noise_strength": ["cover_noise_strength", "coverNoiseStrength"],
+    "tempo_scale": ["tempo_scale", "tempoScale"],
+    "pitch_shift": ["pitch_shift", "pitchShift"],
+    "enable_normalization": ["enable_normalization", "enableNormalization"],
+    "normalization_db": ["normalization_db", "normalizationDb"],
+    "latent_shift": ["latent_shift", "latentShift"],
+    "latent_rescale": ["latent_rescale", "latentRescale"],
     "reference_audio_path": ["reference_audio_path", "ref_audio_path", "referenceAudioPath", "refAudioPath"],
     "src_audio_path": ["src_audio_path", "ctx_audio_path", "sourceAudioPath", "srcAudioPath", "ctxAudioPath"],
     "task_type": ["task_type", "taskType"],
@@ -572,6 +579,9 @@ class GenerateMusicRequest(BaseModel):
 
     instruction: str = DEFAULT_DIT_INSTRUCTION
     audio_cover_strength: float = 1.0
+    cover_noise_strength: float = 0.0
+    tempo_scale: float = 1.0
+    pitch_shift: int = 0
     task_type: str = "text2music"
     analysis_only: bool = False
     full_analysis_only: bool = False
@@ -601,6 +611,11 @@ class GenerateMusicRequest(BaseModel):
     )
     use_tiled_decode: bool = True
 
+    enable_normalization: bool = True
+    normalization_db: float = -1.0
+    latent_shift: float = 0.0
+    latent_rescale: float = 1.0
+
     # 5Hz LM (server-side): used for metadata completion and (when thinking=True) codes generation.
     lm_model_path: Optional[str] = None  # e.g. "acestep-5Hz-lm-0.6B"
     lm_backend: Literal["vllm", "pt", "mlx"] = "vllm"
@@ -615,7 +630,7 @@ class GenerateMusicRequest(BaseModel):
     track_classes: Optional[List[str]] = None
 
     lm_temperature: float = 0.85
-    lm_cfg_scale: float = 2.5
+    lm_cfg_scale: float = 2.0
     lm_top_k: Optional[int] = None
     lm_top_p: Optional[float] = 0.9
     lm_repetition_penalty: float = 1.0
@@ -1456,7 +1471,8 @@ class RequestParser:
 def _validate_audio_path(path: Optional[str]) -> Optional[str]:
     """Validate a user-supplied audio file path to prevent path traversal attacks.
 
-    Accepts absolute paths strictly only if they are within the system temporary directory.
+    Accepts absolute paths strictly only if they are within the system temporary directory
+    or the project's audio storage directory.
     Otherwise, rejects absolute paths and paths containing '..' traversal sequences.
 
     Returns the validated, normalized path or None if the input is None/empty.
@@ -1470,19 +1486,38 @@ def _validate_audio_path(path: Optional[str]) -> Optional[str]:
     system_temp = os.path.realpath(tempfile.gettempdir())
     requested_path = os.path.realpath(path)
 
+    # Also allow paths under the project's audio storage directory
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    audio_dir = os.path.realpath(os.path.join(project_root, "ace-step-ui", "server", "public", "audio"))
+
     # SECURE CHECK: Use os.path.commonpath to verify directory boundary integrity.
     # This prevents prefix bypasses (e.g., /tmp_evil when /tmp is allowed).
-    try:
-        is_in_temp = os.path.commonpath([system_temp, requested_path]) == system_temp
-    except ValueError:
-        # Occurs on Windows if paths are on different drives
-        is_in_temp = False
+    allowed_dirs = [system_temp, audio_dir]
+    is_allowed = False
+    for allowed_dir in allowed_dirs:
+        try:
+            if os.path.commonpath([allowed_dir, requested_path]) == allowed_dir:
+                is_allowed = True
+                break
+        except ValueError:
+            # Occurs on Windows if paths are on different drives
+            continue
 
-    if is_in_temp:
-        # Accept server-generated files in temp
+    if is_allowed:
+        # Accept server-generated files in allowed directories
         return requested_path
 
-    # Reject manual absolute paths outside of temp
+    # Also accept paths within the project root (CWD) — needed for React UI
+    # audio files stored in ace-step-ui/server/public/audio/
+    project_root_cwd = os.path.realpath(os.getcwd())
+    try:
+        is_in_project = os.path.commonpath([project_root_cwd, requested_path]) == project_root_cwd
+    except ValueError:
+        is_in_project = False
+    if is_in_project:
+        return requested_path
+
+    # Reject manual absolute paths outside of allowed directories
     if os.path.isabs(path):
         raise HTTPException(status_code=400, detail="absolute audio file paths are not allowed")
     # Reject path traversal via '..' components
@@ -1517,16 +1552,29 @@ async def _save_upload_to_temp(upload: StarletteUploadFile, *, prefix: str) -> s
     return path
 
 class LogBuffer:
-    def __init__(self):
+    def __init__(self, maxlen: int = 500):
         self.last_message = "Waiting"
+        self._lines: deque = deque(maxlen=maxlen)
+        self._cursor: int = 0
+        self._lock = Lock()
 
     def write(self, message):
         msg = message.strip()
         if msg:
             self.last_message = msg
+            with self._lock:
+                self._lines.append((self._cursor, msg))
+                self._cursor += 1
 
     def flush(self):
         pass
+
+    def get_lines_after(self, after_cursor: int = -1):
+        """Return lines with cursor > after_cursor."""
+        with self._lock:
+            lines = [(c, l) for c, l in self._lines if c > after_cursor]
+            current_cursor = self._cursor
+        return lines, current_cursor
 
 log_buffer = LogBuffer()
 logger.add(lambda msg: log_buffer.write(msg), format="{time:HH:mm:ss} | {level} | {message}")
@@ -2187,6 +2235,13 @@ def create_app() -> FastAPI:
                     repainting_start=req.repainting_start,
                     repainting_end=req.repainting_end if req.repainting_end else -1,
                     audio_cover_strength=req.audio_cover_strength,
+                    cover_noise_strength=req.cover_noise_strength,
+                    tempo_scale=req.tempo_scale,
+                    pitch_shift=req.pitch_shift,
+                    enable_normalization=req.enable_normalization,
+                    normalization_db=req.normalization_db,
+                    latent_shift=req.latent_shift,
+                    latent_rescale=req.latent_rescale,
                     # LM parameters
                     thinking=thinking,  # Use LM for code generation when thinking=True
                     lm_temperature=req.lm_temperature,
@@ -2917,6 +2972,13 @@ def create_app() -> FastAPI:
                 repainting_end=p.float("repainting_end"),
                 instruction=p.str("instruction", DEFAULT_DIT_INSTRUCTION),
                 audio_cover_strength=p.float("audio_cover_strength", 1.0),
+                cover_noise_strength=p.float("cover_noise_strength", 0.0),
+                tempo_scale=p.float("tempo_scale", 1.0),
+                pitch_shift=p.int("pitch_shift", 0),
+                enable_normalization=p.bool("enable_normalization", True),
+                normalization_db=p.float("normalization_db", -1.0),
+                latent_shift=p.float("latent_shift", 0.0),
+                latent_rescale=p.float("latent_rescale", 1.0),
                 reference_audio_path=ref_audio,
                 src_audio_path=src_audio,
                 task_type=p.str("task_type", "text2music"),
@@ -3796,7 +3858,6 @@ def create_app() -> FastAPI:
         wrap_response=_wrap_response,
         start_tensorboard=_start_tensorboard,
         stop_tensorboard=_stop_tensorboard,
-        temporary_llm_model=_temporary_llm_model,
         atomic_write_json=_atomic_write_json,
         append_jsonl=_append_jsonl,
     )
@@ -3973,6 +4034,64 @@ def create_app() -> FastAPI:
         status = handler.get_steering_status()
         return _wrap_response({"message": f"Steering {'enabled' if enabled else 'disabled'}", **status})
 
+
+    # =========================================================================
+    # System Metrics & Log Endpoints (Debug Panel)
+    # =========================================================================
+
+    @app.get("/v1/system/metrics")
+    async def system_metrics():
+        """Return live system metrics: GPU VRAM, system RAM, CPU."""
+        gpu = {}
+        if torch.cuda.is_available():
+            try:
+                idx = torch.cuda.current_device()
+                free_bytes, total_bytes = torch.cuda.mem_get_info(idx)
+                allocated_bytes = torch.cuda.memory_allocated(idx)
+                reserved_bytes = torch.cuda.memory_reserved(idx)
+                gpu = {
+                    "name": torch.cuda.get_device_name(idx),
+                    "allocated_gb": round(allocated_bytes / (1024**3), 2),
+                    "reserved_gb": round(reserved_bytes / (1024**3), 2),
+                    "free_gb": round(free_bytes / (1024**3), 2),
+                    "total_gb": round(total_bytes / (1024**3), 2),
+                }
+            except Exception:
+                gpu = {"error": "Failed to read GPU metrics"}
+        else:
+            gpu = {"error": "No CUDA device available"}
+
+        ram = {}
+        cpu = {}
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            ram = {
+                "used_gb": round(mem.used / (1024**3), 2),
+                "total_gb": round(mem.total / (1024**3), 2),
+                "percent": mem.percent,
+            }
+            cpu = {
+                "percent": psutil.cpu_percent(interval=0),
+                "count": psutil.cpu_count(logical=True),
+            }
+        except ImportError:
+            ram = {"error": "psutil not installed"}
+            cpu = {"error": "psutil not installed"}
+        except Exception as e:
+            ram = {"error": str(e)}
+            cpu = {"error": str(e)}
+
+        return {"gpu": gpu, "ram": ram, "cpu": cpu}
+
+    @app.get("/v1/system/logs")
+    async def system_logs(after: int = -1):
+        """Return log lines after the given cursor for efficient polling."""
+        lines, current_cursor = log_buffer.get_lines_after(after)
+        return {
+            "lines": [line for _, line in lines],
+            "cursor": current_cursor,
+        }
 
     return app
 

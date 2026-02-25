@@ -90,6 +90,8 @@ class GenerateMusicRequestMixin:
         audio_code_string: Union[str, List[str]],
         actual_batch_size: int,
         task_type: str,
+        tempo_scale: float = 1.0,
+        pitch_shift: int = 0,
     ) -> Tuple[Optional[List[List[torch.Tensor]]], Optional[torch.Tensor], Optional[Dict[str, Any]]]:
         """Prepare reference/source audio tensors and return early error payload when invalid."""
         if reference_audio is not None:
@@ -132,8 +134,32 @@ class GenerateMusicRequestMixin:
                         "success": False,
                         "error": "Invalid source audio",
                     }
+                # Apply tempo scaling (pitch-preserving time-stretch) if requested
+                if tempo_scale != 1.0:
+                    import torchaudio
+                    original_len = processed_src_audio.shape[-1]
+                    processed_src_audio, _ = torchaudio.functional.speed(
+                        processed_src_audio, orig_freq=48000, factor=tempo_scale
+                    )
+                    new_len = processed_src_audio.shape[-1]
+                    logger.info(
+                        f"[generate_music] Tempo scaled by {tempo_scale}x "
+                        f"({original_len / 48000:.1f}s → {new_len / 48000:.1f}s)"
+                    )
+                # Apply pitch shift (speed-preserving key change) if requested
+                if pitch_shift != 0:
+                    import torchaudio
+                    processed_src_audio = torchaudio.functional.pitch_shift(
+                        processed_src_audio, sample_rate=48000, n_steps=pitch_shift
+                    )
+                    direction = "up" if pitch_shift > 0 else "down"
+                    logger.info(
+                        f"[generate_music] Pitch shifted {direction} by "
+                        f"{abs(pitch_shift)} semitone(s)"
+                    )
 
         return refer_audios, processed_src_audio, None
+
 
     def _prepare_generate_music_service_inputs(
         self,

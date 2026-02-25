@@ -103,6 +103,28 @@ _preprocess_lock = Lock()
 _preprocess_tasks: Dict[str, PreprocessTask] = {}
 _preprocess_latest_task_id: Optional[str] = None
 
+_transcribe_lock = Lock()
+_transcribe_tasks: Dict[str, "TranscribeTask"] = {}
+_transcribe_latest_task_id: Optional[str] = None
+
+
+@dataclass
+class TranscribeTask:
+    """Runtime status snapshot for async lyrics transcription tasks."""
+
+    task_id: str
+    status: str
+    progress: str
+    current: int
+    total: int
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    last_updated_index: Optional[int] = None
+    last_updated_sample: Optional[Dict[str, Any]] = None
+    save_path: Optional[str] = None
+
 
 def initialize_training_state(app: FastAPI) -> None:
     """Ensure app state has a stable ``training_state`` mapping."""

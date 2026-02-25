@@ -1,5 +1,6 @@
 """Top-level initialization orchestration for the handler."""
 
+import gc
 import os
 import traceback
 from pathlib import Path
@@ -95,6 +96,13 @@ class InitServiceOrchestratorMixin:
             attn = getattr(self.config, "_attn_implementation", "eager")
             status = f"[OK] Switched to {config_path} on {self.device} (attn={attn})"
             logger.info(f"[switch_dit_model] {status}")
+
+            # Post-switch VRAM cleanup: release cached allocator blocks
+            if torch.cuda.is_available():
+                gc.collect()
+                torch.cuda.empty_cache()
+                logger.info("[switch_dit_model] Post-switch VRAM cleanup complete")
+
             return status, True
         except Exception as exc:
             error_msg = f"Failed to switch model to {config_path}: {exc}"

@@ -9,6 +9,37 @@ chcp 65001 >nul 2>&1
 
 cd /d "%~dp0"
 
+REM ---- Optional: Check for updates ----
+echo.
+echo =============================================
+echo   Check for updates?
+echo =============================================
+echo.
+choice /C YN /T 10 /D N /M "Pull latest from GitHub? (auto-skips in 10s)"
+if errorlevel 2 goto skip_update
+echo.
+echo Updating main repository...
+git pull myfork qinglong 2>nul || git pull origin qinglong 2>nul
+if errorlevel 1 (
+    echo   [!] Main repo update failed or had conflicts. Continuing anyway.
+) else (
+    echo   Main repo updated.
+)
+echo.
+echo Updating ace-step-ui submodule...
+pushd ace-step-ui
+git pull myfork qinglong 2>nul || git pull origin qinglong 2>nul
+if errorlevel 1 (
+    echo   [!] Submodule update failed or had conflicts. Continuing anyway.
+) else (
+    echo   Submodule updated.
+)
+popd
+echo.
+echo   Update complete!
+echo.
+:skip_update
+
 REM Tell start.bat not to open a browser — our loading page handles that
 set "ACESTEP_NO_BROWSER=1"
 

@@ -145,6 +145,8 @@ class GenerationParams:
     repainting_end: float = -1
     audio_cover_strength: float = 1.0
     cover_noise_strength: float = 0.0  # 0=pure noise (no cover), 1=closest to src audio
+    tempo_scale: float = 1.0  # Pitch-preserving time-stretch factor for cover mode (>1=faster, <1=slower)
+    pitch_shift: int = 0  # Semitone shift for cover source audio (+N=higher, -N=lower)
 
     # 5Hz Language Model Parameters
     thinking: bool = True
@@ -613,6 +615,8 @@ def generate_music(
             instruction=params.instruction,
             audio_cover_strength=params.audio_cover_strength,
             cover_noise_strength=params.cover_noise_strength,
+            tempo_scale=params.tempo_scale,
+            pitch_shift=params.pitch_shift,
             task_type=params.task_type,
             use_adg=params.use_adg,
             guidance_mode=params.guidance_mode if hasattr(params, 'guidance_mode') else "",

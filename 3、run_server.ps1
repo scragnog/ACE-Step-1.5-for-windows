@@ -47,6 +47,9 @@ $uv_args = [System.Collections.ArrayList]::new()
 [void]$ext_args.Add("--port")
 [void]$ext_args.Add($Port)
 
+# Pre-install build deps (required when UV_NO_BUILD_ISOLATION=1)
+uv pip install hatchling editables 2>$null
+
 # run train
 uv run $uv_args acestep-api $ext_args
 

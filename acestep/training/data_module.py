@@ -216,12 +216,11 @@ class PreprocessedTensorDataset(Dataset):
         if os.path.exists(manifest_path):
             with open(manifest_path, 'r') as f:
                 manifest = json.load(f)
-            raw_entries = manifest.get("samples", [])
-            for raw in raw_entries:
-                resolved = self._resolve_manifest_entry(raw)
+            raw_paths = manifest.get("samples", [])
+            for raw in raw_paths:
+                resolved = self._resolve_manifest_path(raw)
                 if resolved is not None:
-                    self.sample_refs.append(resolved)
-                    self.sample_paths.append(resolved["path"])
+                    self.sample_paths.append(resolved)
         else:
             # Fallback: scan directory for .pt files (already inside tensor_dir)
             for f in os.listdir(self.tensor_dir):
@@ -269,6 +268,9 @@ class PreprocessedTensorDataset(Dataset):
         try:
             child = safe_path(raw)
             if os.path.exists(child):
+                logger.debug(
+                    f"Resolved legacy manifest path via safe root: {raw}"
+                )
                 return child
         except ValueError:
             pass

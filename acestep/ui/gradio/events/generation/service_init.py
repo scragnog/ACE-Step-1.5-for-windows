@@ -14,7 +14,7 @@ from acestep.gpu_config import (
     get_global_gpu_config, is_lm_model_size_allowed, find_best_lm_model_on_disk,
     get_gpu_config_for_tier, set_global_gpu_config, GPU_TIER_LABELS, GPU_TIER_CONFIGS,
 )
-from .model_config import _is_pure_base_model, get_model_type_ui_settings
+from .model_config import is_pure_base_model, get_model_type_ui_settings
 
 
 def refresh_checkpoints(dit_handler):
@@ -114,7 +114,7 @@ def init_service_wrapper(
     accordion_state = gr.Accordion(open=not is_model_initialized)
 
     is_turbo = dit_handler.is_turbo_model()
-    is_pure_base = _is_pure_base_model((config_path or "").lower())
+    is_pure_base = is_pure_base_model((config_path or "").lower())
     model_type_settings = get_model_type_ui_settings(
         is_turbo, current_mode=current_mode, is_pure_base=is_pure_base,
     )

@@ -202,8 +202,15 @@ class LabelAllMixin:
         batch_size: int = 1,
         progress_callback=None,
         sample_labeled_callback: Optional[Callable[[int, AudioSample, str], None]] = None,
+        on_phase_complete: Optional[Callable[[int], None]] = None,
     ) -> Tuple[List[AudioSample], str]:
-        """Label all samples in the dataset."""
+        """Label all samples in the dataset.
+
+        Args:
+            on_phase_complete: Called with the phase number (1-indexed) after
+                that phase finishes.  Useful for releasing GPU resources that
+                are no longer needed (e.g. offloading VAE after Phase 1).
+        """
         if not self.samples:
             return [], "❌ No samples to label. Please scan a directory first."
 
@@ -230,6 +237,9 @@ class LabelAllMixin:
             chunk_size=chunk_size,
             batch_size=batch_size,
         )
+
+        if on_phase_complete:
+            on_phase_complete(1)
 
         if progress_callback:
             progress_callback(f"Phase 2/{2}: Labeling {total} samples with LLM...")

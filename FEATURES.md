@@ -6,6 +6,37 @@ This document tracks all new features added on top of the upstream [sdbds/ACE-St
 
 ---
 
+## Tempo Scale & Pitch Shift (Cover Mode)
+
+**Branch:** `qinglong`  
+**Status:** ✅ Merged
+
+Pre-process source audio before VAE encoding with pitch-preserving tempo changes and speed-preserving pitch shifts. Enables changing the tempo of a cover independently from its key, or transposing a male vocal track into a female range (or vice versa) before generation.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/core/generation/handler/generate_music_request.py` | Time-stretch via `torchaudio.functional.speed()` and pitch shift via `torchaudio.functional.pitch_shift()`, applied after `process_src_audio()` and before padding/VAE encoding |
+| `acestep/core/generation/handler/generate_music.py` | `tempo_scale` and `pitch_shift` params threaded through `generate_music()` |
+| `acestep/inference.py` | Added to `GenerationParams` dataclass |
+| `acestep/api_server.py` | Alias mapping, request model, REST and Gradio handlers |
+| `ace-step-ui/server/src/routes/generate.ts` | `GenerateBody` type + request body (gated to cover/repaint/a2a tasks) |
+| `ace-step-ui/components/CreatePanel.tsx` | State variables, prop passing, generate request inclusion |
+| `ace-step-ui/components/sections/CoverRepaintSettings.tsx` | Side-by-side Tempo Scale (0.5x–2.0x) and Pitch Shift (-12 to +12 semitones) sliders |
+| `ace-step-ui/i18n/translations.ts` | Labels, help text, and tooltips for both controls |
+
+### How it works
+
+1. Both sliders appear in the **Cover Settings** section (hidden for text2music/extract modes)
+2. **Tempo Scale** (0.5x–2.0x): Uses phase vocoder to change speed without affecting pitch. 1.3x = 30% faster output, 0.8x = 20% slower
+3. **Pitch Shift** (-12 to +12 semitones): Transposes the source audio without changing speed. +4 shifts up ~a major third (e.g. male→female vocal range), -3 shifts down a minor third
+4. Both transforms are applied to the source audio tensor *before* it enters the padding and VAE encoding pipeline, so the model generates in the new tempo/key space
+5. The two can be combined — e.g. speed up 1.2x AND shift up 3 semitones simultaneously
+6. Display format: Tempo shows as `1.30x`, Pitch shows as `+3 ♯` / `-2 ♭`
+
+---
+
 ## Activation Steering (TADA)
 
 **Branch:** `feature/activation-steering`  
@@ -329,6 +360,70 @@ Export all generation parameters to a JSON file and import them later to reprodu
 
 ---
 
+## Debug Panel & UI Polish
+
+**Branch:** `feature/debug-panel`  
+**Status:** ✅ Merged
+
+Live system monitoring panel and UI polish improvements: a collapsible debug panel showing GPU VRAM, RAM, and CPU usage alongside a real-time streaming API log, a resizable Create Panel, and a streamlined sidebar toggle.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/api_server.py` | Extended `LogBuffer` with ring buffer + cursor. Added `GET /v1/system/metrics` (GPU, RAM, CPU) and `GET /v1/system/logs` (cursor-based). |
+| `ace-step-ui/server/src/routes/system.ts` | **[NEW]** Express route: metrics proxy + SSE log stream at `/api/system/*`. |
+| `ace-step-ui/server/src/index.ts` | Mounted system routes. |
+| `ace-step-ui/components/DebugPanel.tsx` | **[NEW]** Fixed right-edge panel with progress bars, retro terminal log viewer, persisted state. |
+| `ace-step-ui/App.tsx` | Integrated DebugPanel, content shift on open, resizable CreatePanel with drag handle. |
+| `ace-step-ui/components/Sidebar.tsx` | Replaced logo + separate arrow with a single purple circle toggle (chevron arrow). |
+| `requirements.txt` | Added `psutil>=5.9.0` for CPU/RAM metrics. |
+
+### How it works
+
+1. **Debug Panel:** A toggle tab on the right screen edge opens a 400px panel showing VRAM/RAM/CPU metrics (polled every 2s) and a streaming API log with color-coded levels (green text on black — retro terminal style). Panel state persists across sessions.
+2. **Content Shift:** When the debug panel opens, the entire layout (including Song Details sidebar) smoothly slides left to keep everything visible.
+3. **Resizable Create Panel:** Drag the right edge of the parameters panel to resize it (280–600px). Width persists across sessions. The track list absorbs the change.
+4. **Sidebar Toggle:** The purple circle in the top-left now contains a chevron arrow that rotates to indicate expand/collapse. The separate arrow button has been removed.
+
+---
+
+## Stem Extraction (Extract Mode)
+
+**Branch:** `feature/extract-task`  
+**Status:** ✅ Merged
+
+Full stem extraction workflow using ACE-Step's generative extract task. Select one or more instrument stems to isolate from a source audio file — each creates a separate queued job. Includes quality presets, style hints, and lyrics guidance for vocal tracks.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `ace-step-ui/components/sections/ExtractTrackSelector.tsx` | Multi-select toggle chip UI for choosing stems (12 track types) |
+| `ace-step-ui/components/CreatePanel.tsx` | Extract mode flow: quality presets, style hint, lyrics guidance, meta clearing, handleGenerate loop for multi-track jobs |
+| `ace-step-ui/server/src/routes/generate.ts` | Passes `src_audio_path`, `reference_audio_path`, `track_name` to Python backend |
+| `ace-step-ui/server/src/routes/referenceTrack.ts` | Extended upload whitelist for `.ogg`, `.opus`, `.webm` formats |
+| `acestep/api_server.py` | Whitelisted project audio directory in `_validate_audio_path` |
+| `acestep/core/generation/handler/io_audio.py` | Replaced `torchaudio.load` with `soundfile.read` for Windows compatibility |
+| `ace-step-ui/i18n/translations.ts` | 20+ localized keys for extract UI (en, zh, ja, ko) |
+
+### How it works
+
+1. **Track Selection:** Toggle one or more stems from 12 available track types (Vocals, Backing Vocals, Drums, Bass, Guitar, Keyboard, Strings, Synth, Brass, Woodwinds, Percussion, FX). Each selected track queues a separate extraction job.
+2. **Quality Presets:** Three one-click presets configure inference steps, solver, and guidance mode:
+   - ⚡ **Low (Quick):** 20 steps, Euler, Dynamic CFG
+   - ⚖️ **Medium:** 50 steps, Heun, Dynamic CFG
+   - 💎 **High (Slow):** 200 steps, RK4, Dynamic CFG
+3. **Style Hint (Optional):** A text field to describe the expected timbre/genre (e.g., "distorted electric guitar, heavy rock") — passed as the `style` parameter to guide generation quality.
+4. **Lyrics Guidance (Optional):** For vocal/backing vocal tracks, paste lyrics to improve extraction accuracy. The `instrumental` flag is automatically set to `false` for vocal tracks.
+5. **Meta Clearing:** BPM, key, and time signature are zeroed for extract mode so stale values from previous text2music sessions don't interfere — the model relies on the actual source audio.
+6. **Title Format:** Extract jobs are titled `"Vocals - My Song.mp3"` instead of generic names, using the source audio filename.
+7. **Windows Fix:** Replaced `torchaudio.load` with `soundfile.read` in the audio processing pipeline, resolving `torchcodec` dependency failures on Windows.
+
+> **Note:** ACE-Step's extract is *generative*, not subtractive. Unlike traditional source separation tools (Demucs, BSRNN), the model re-generates what it thinks each stem sounds like based on the source audio and instruction. This means vocal tracks may occasionally hallucinate audio in silent sections.
+
+---
+
 <!-- 
 ## [Next Feature Name]
 
@@ -343,4 +438,3 @@ Brief description.
 ### How it works
 - ...
 -->
-
