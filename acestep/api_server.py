@@ -403,6 +403,8 @@ PARAM_ALIASES = {
     "track_classes": ["track_classes", "trackClasses", "instruments"],
     "get_lrc": ["get_lrc", "getLrc"],
     "lm_repetition_penalty": ["lm_repetition_penalty", "lmRepetitionPenalty"],
+    "get_scores": ["get_scores", "getScores"],
+    "score_scale": ["score_scale", "scoreScale"],
 }
 
 
@@ -640,6 +642,8 @@ class GenerateMusicRequest(BaseModel):
     lm_negative_prompt: str = "NO USER INPUT"
 
     get_lrc: bool = False
+    get_scores: bool = False
+    score_scale: float = 0.1
 
     steering_enabled: bool = False
     steering_loaded: List[str] = Field(default_factory=list)
@@ -2581,6 +2585,7 @@ def create_app() -> FastAPI:
                     "lm_model": lm_model_name,
                     "dit_model": dit_model_name,
                     "lrc": [audio.get("lrc_text", "") for audio in result.audios] if req.get_lrc else None,
+                    "scores": result.extra_outputs.get("scores") if req.get_scores else None,
                 }
 
             t0 = time.time()

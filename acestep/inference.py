@@ -173,6 +173,10 @@ class GenerationParams:
     # LRC (synced lyrics) generation
     get_lrc: bool = False
 
+    # Quality scoring
+    get_scores: bool = False
+    score_scale: float = 0.1
+
     # Steering Parameters
     steering_enabled: bool = False
     steering_loaded: List[str] = field(default_factory=list)
@@ -801,9 +805,78 @@ def generate_music(
             else:
                 logger.warning("[generate_music] LRC requested but extra_outputs missing required tensors")
 
+        # ── Phase 3b: Quality scoring (if requested) ──────────────────────
+        scores = {}
+        if params.get_scores:
+            logger.info("[generate_music] Running quality scoring...")
+
+            # PMI scoring (requires audio codes from LM)
+            has_codes = (use_lm and lm_generated_audio_codes_list
+                         and any(c for c in lm_generated_audio_codes_list if c))
+            if has_codes and llm_handler and llm_handler.llm_initialized:
+                try:
+                    from acestep.core.scoring.lm_score import calculate_pmi_score_per_condition
+                    # Use first sample's codes for scoring
+                    codes_str = lm_generated_audio_codes_list[0] if lm_generated_audio_codes_list else ""
+                    metadata_for_score = {}
+                    if lm_generated_metadata and isinstance(lm_generated_metadata, dict):
+                        metadata_for_score.update(lm_generated_metadata)
+                    if bpm is not None and 'bpm' not in metadata_for_score:
+                        try: metadata_for_score['bpm'] = int(bpm)
+                        except Exception: pass
+                    if caption and 'caption' not in metadata_for_score:
+                        metadata_for_score['caption'] = caption
+                    if vocal_language and 'language' not in metadata_for_score:
+                        metadata_for_score['language'] = vocal_language
+
+                    pmi_scores, pmi_global, _pmi_status = calculate_pmi_score_per_condition(
+                        llm_handler=llm_handler,
+                        audio_codes=codes_str,
+                        caption=caption or "",
+                        lyrics=lyrics or "",
+                        metadata=metadata_for_score if metadata_for_score else None,
+                        score_scale=params.score_scale,
+                    )
+                    scores["pmi"] = {"global": pmi_global, "per_condition": pmi_scores}
+                    logger.info(f"[generate_music] PMI global score: {pmi_global:.4f}")
+                except Exception as e:
+                    logger.warning(f"[generate_music] PMI scoring failed: {e}")
+
+            # DiT alignment scoring (works without thinking — uses cross-attention)
+            if (enc_hidden is not None and enc_mask is not None
+                    and ctx_latents is not None and lyric_ids is not None
+                    and pred_latents is not None and lyrics and lyrics.strip()):
+                try:
+                    align_result = dit_handler.get_lyric_score(
+                        pred_latent=pred_latents[0:1],
+                        encoder_hidden_states=enc_hidden[0:1],
+                        encoder_attention_mask=enc_mask[0:1],
+                        context_latents=ctx_latents[0:1],
+                        lyric_token_ids=lyric_ids[0:1],
+                        vocal_language=vocal_language or "en",
+                        inference_steps=int(params.inference_steps),
+                        seed=42,
+                    )
+                    if align_result.get("success"):
+                        scores["dit_alignment"] = {
+                            "lm_score": align_result.get("lm_score", 0.0),
+                            "dit_score": align_result.get("dit_score", 0.0),
+                        }
+                        logger.info(
+                            f"[generate_music] DiT alignment: "
+                            f"lm={align_result.get('lm_score', 0.0):.4f}, "
+                            f"dit={align_result.get('dit_score', 0.0):.4f}"
+                        )
+                    else:
+                        logger.warning(f"[generate_music] DiT alignment failed: {align_result.get('error')}")
+                except Exception as e:
+                    logger.warning(f"[generate_music] DiT alignment scoring failed: {e}")
+
         # Merge extra_outputs: include dit_extra_outputs (latents, masks) and add LM metadata
         extra_outputs = dit_extra_outputs.copy()
         extra_outputs["lm_metadata"] = lm_generated_metadata
+        if scores:
+            extra_outputs["scores"] = scores
 
         # Merge time_costs from both LM and DiT into a unified dictionary
         unified_time_costs = {}
