@@ -3067,6 +3067,8 @@ def create_app() -> FastAPI:
                 track_name=p.str("track_name"),
                 track_classes=t_classes,
                 get_lrc=p.bool("get_lrc"),
+                get_scores=p.bool("get_scores"),
+                score_scale=p.float("score_scale", 0.1),
                 steering_enabled=p.bool("steering_enabled"),
                 steering_loaded=p.get("steering_loaded") or [],
                 steering_alphas=p.get("steering_alphas") or {},
