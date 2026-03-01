@@ -366,7 +366,12 @@ def _apply_merged_weights_with_groups(self) -> None:
                 if k in s["delta"]:
                     g_scale = s.get("group_scales", {}).get(group, 1.0)
                     l_scales = s.get("layer_scales", {})
-                    l_scale = l_scales.get(layer_idx, 1.0) if layer_idx is not None and l_scales else 1.0
+                    if layer_idx is not None:
+                        l_scale = l_scales.get(layer_idx, 1.0)
+                    elif l_scales:
+                        l_scale = sum(l_scales.values()) / max(len(l_scales), 1)
+                    else:
+                        l_scale = 1.0
                     combined = combined + s["scale"] * g_scale * l_scale * s["delta"][k]
             merged[k] = combined.to(dtype=base_val.dtype)
         else:
@@ -727,7 +732,14 @@ def _apply_merged_weights_temporal(self, schedule_scales: Dict[int, float]) -> N
                     slot_scale = schedule_scales.get(sid, 0.0)
                     g_scale = s.get("group_scales", {}).get(group, 1.0)
                     l_scales = s.get("layer_scales", {})
-                    l_scale = l_scales.get(layer_idx, 1.0) if layer_idx is not None and l_scales else 1.0
+                    if layer_idx is not None:
+                        l_scale = l_scales.get(layer_idx, 1.0)
+                    elif l_scales:
+                        # Non-layer key (norm, embedding, etc.): use average of set scales
+                        # so zeroing all layers also zeroes non-layer weights
+                        l_scale = sum(l_scales.values()) / max(len(l_scales), 1)
+                    else:
+                        l_scale = 1.0
                     combined = combined + slot_scale * g_scale * l_scale * s["delta"][k]
             merged[k] = combined.to(dtype=base_val.dtype)
         else:
