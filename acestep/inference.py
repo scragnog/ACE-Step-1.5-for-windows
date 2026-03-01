@@ -905,6 +905,20 @@ def generate_music(
             status_message = "\n".join(lm_status) + "\n" + status_message
         else:
             status_message = status_message
+
+        # Append score summary to status message
+        if scores:
+            score_lines = ["\n📊 Quality Scores:"]
+            if "pmi" in scores:
+                pmi = scores["pmi"]
+                score_lines.append(f"  PMI Global: {pmi['global']:.4f}")
+                for cond, val in sorted(pmi.get("per_condition", {}).items()):
+                    score_lines.append(f"    • {cond}: {val:.4f}")
+            if "dit_alignment" in scores:
+                da = scores["dit_alignment"]
+                score_lines.append(f"  DiT Alignment (LM): {da['lm_score']:.4f}")
+                score_lines.append(f"  DiT Alignment (DiT): {da['dit_score']:.4f}")
+            status_message += "\n".join(score_lines)
         # Create and return GenerationResult
         return GenerationResult(
             audios=audios,
