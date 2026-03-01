@@ -2552,8 +2552,9 @@ def create_app() -> FastAPI:
                         return None
                     return s
 
-                # Get model information
-                lm_model_name = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B")
+                # Get model information — use the live tracking state, NOT the env var
+                # (env var never changes after startup; _llm_model_path is updated on every hot-switch)
+                lm_model_name = getattr(app.state, "_llm_model_path", "") or os.getenv("ACESTEP_LM_MODEL_PATH", "")
                 # Use selected_model_name (set at the beginning of _run_one_job)
                 dit_model_name = selected_model_name
 
