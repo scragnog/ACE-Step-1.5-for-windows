@@ -2552,6 +2552,21 @@ def create_app() -> FastAPI:
                     num_audios=len(result.audios),
                 )
 
+                # Append quality scores to generation info if present
+                scores = result.extra_outputs.get("scores")
+                if scores:
+                    score_lines = ["\n📊 Quality Scores:"]
+                    if "pmi" in scores:
+                        pmi = scores["pmi"]
+                        score_lines.append(f"  PMI Global: {pmi['global']:.4f}")
+                        for cond, val in sorted(pmi.get("per_condition", {}).items()):
+                            score_lines.append(f"    • {cond}: {val:.4f}")
+                    if "dit_alignment" in scores:
+                        da = scores["dit_alignment"]
+                        score_lines.append(f"  DiT Alignment (LM): {da['lm_score']:.4f}")
+                        score_lines.append(f"  DiT Alignment (DiT): {da['dit_score']:.4f}")
+                    generation_info += "\n".join(score_lines)
+
                 def _none_if_na_str(v: Any) -> Optional[str]:
                     if v is None:
                         return None
