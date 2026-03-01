@@ -2091,6 +2091,12 @@ def create_app() -> FastAPI:
                 # - use_cot_caption or use_cot_language (LM enhances metadata)
                 want_llm = use_cot_caption or use_cot_language
 
+                # Always run the model-switch check when the frontend specifies a model,
+                # even in non-thinking mode.  _ensure_llm_ready is a fast no-op when the
+                # correct model is already loaded, so this is cheap in the common case.
+                if req.lm_model_path and not require_llm and not want_llm:
+                    _ensure_llm_ready()
+
                 # Check if LLM is available
                 llm_available = True
                 if require_llm or want_llm:
