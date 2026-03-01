@@ -155,6 +155,7 @@ class GenerationParams:
     lm_top_k: int = 0
     lm_top_p: float = 0.9
     lm_negative_prompt: str = "NO USER INPUT"
+    lm_repetition_penalty: float = 1.0
     use_cot_metas: bool = True
     use_cot_caption: bool = True
     use_cot_lyrics: bool = False  # TODO: not used yet
@@ -489,6 +490,7 @@ def generate_music(
                     temperature=params.lm_temperature,
                     cfg_scale=params.lm_cfg_scale,
                     negative_prompt=params.lm_negative_prompt,
+                    repetition_penalty=params.lm_repetition_penalty if params.lm_repetition_penalty > 1.0 else None,
                     top_k=top_k_value,
                     top_p=top_p_value,
                     target_duration=audio_duration,  # Pass duration to limit audio codes generation
