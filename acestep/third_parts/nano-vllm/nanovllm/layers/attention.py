@@ -242,8 +242,8 @@ def _sdpa_decode_with_paged_cache(
 ) -> torch.Tensor:
     """SDPA replacement for flash_attn_with_kvcache during decode.
 
-    For each sequence, gathers KV from paged cache and runs SDPA
-    for the single new query token against the full context.
+    CUDA-graph-compatible: avoids .item() calls by using max context
+    length with attention masking instead of per-sequence trimming.
 
     Args:
         q: [batch, 1, num_heads, head_dim] (already unsqueezed)
@@ -260,29 +260,46 @@ def _sdpa_decode_with_paged_cache(
     """
     batch_size = q.shape[0]
     block_size = k_cache.shape[1]
-    outputs = []
+    head_dim = k_cache.shape[-1]
     enable_gqa = num_heads != num_kv_heads
+    max_blocks = block_tables.shape[1]
+    max_ctx = max_blocks * block_size
 
-    for i in range(batch_size):
-        ctx_len = context_lens[i].item()
-        num_blocks_needed = (ctx_len + block_size - 1) // block_size
-        block_indices = block_tables[i, :num_blocks_needed]
+    # Gather ALL blocks for each sequence into contiguous KV tensors.
+    # block_tables: [batch, max_blocks] → indices into k_cache/v_cache
+    # Clamp to valid range (block_tables may contain -1 for padding)
+    safe_indices = block_tables.clamp(min=0)  # [batch, max_blocks]
 
-        # Gather and trim KV: [ctx_len, num_kv_heads, head_dim]
-        ki = k_cache[block_indices].reshape(-1, num_kv_heads, k_cache.shape[-1])[:ctx_len]
-        vi = v_cache[block_indices].reshape(-1, num_kv_heads, v_cache.shape[-1])[:ctx_len]
+    # Gather: [batch, max_blocks, block_size, num_kv_heads, head_dim]
+    ki = k_cache[safe_indices]
+    vi = v_cache[safe_indices]
 
-        # q[i]: [1, num_heads, head_dim] -> [1, num_heads, 1, head_dim]
-        qi = q[i].unsqueeze(0).transpose(1, 2)     # [1, num_heads, 1, head_dim]
-        ki = ki.unsqueeze(0).transpose(1, 2)        # [1, num_kv_heads, ctx_len, head_dim]
-        vi = vi.unsqueeze(0).transpose(1, 2)        # [1, num_kv_heads, ctx_len, head_dim]
+    # Reshape to [batch, max_ctx, num_kv_heads, head_dim]
+    ki = ki.reshape(batch_size, max_ctx, num_kv_heads, head_dim)
+    vi = vi.reshape(batch_size, max_ctx, num_kv_heads, head_dim)
 
-        oi = F.scaled_dot_product_attention(
-            qi, ki, vi, scale=scale, is_causal=False, enable_gqa=enable_gqa
-        )
-        outputs.append(oi.transpose(1, 2).squeeze(0))  # [1, num_heads, head_dim]
+    # Transpose to [batch, num_kv_heads, max_ctx, head_dim] for SDPA
+    ki = ki.transpose(1, 2)
+    vi = vi.transpose(1, 2)
 
-    return torch.stack(outputs, dim=0)  # [batch, 1, num_heads, head_dim]
+    # q: [batch, 1, num_heads, head_dim] → [batch, num_heads, 1, head_dim]
+    qi = q.transpose(1, 2)
+
+    # Build attention mask: only attend to valid tokens (up to context_lens)
+    # positions: [1, max_ctx], context_lens: [batch, 1]
+    positions = torch.arange(max_ctx, device=q.device).unsqueeze(0)  # [1, max_ctx]
+    valid_mask = positions < context_lens.unsqueeze(1)  # [batch, max_ctx]
+
+    # SDPA expects mask shape [batch, 1, 1, max_ctx] for broadcasting
+    attn_mask = valid_mask.unsqueeze(1).unsqueeze(1)  # [batch, 1, 1, max_ctx]
+
+    oi = F.scaled_dot_product_attention(
+        qi, ki, vi, attn_mask=attn_mask, scale=scale, is_causal=False,
+        enable_gqa=enable_gqa,
+    )
+
+    # [batch, num_heads, 1, head_dim] → [batch, 1, num_heads, head_dim]
+    return oi.transpose(1, 2)
 
 
 # ============================================================
