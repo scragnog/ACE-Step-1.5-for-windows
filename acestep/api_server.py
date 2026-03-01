@@ -1723,6 +1723,7 @@ def create_app() -> FastAPI:
         app.state.job_queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)  # (job_id, req)
         app.state.pending_ids = deque()  # queued job_ids
         app.state.pending_lock = asyncio.Lock()
+        app.state.cancelled_jobs: set = set()  # job_ids cancelled by user
 
         # temp files per job (from multipart uploads)
         app.state.job_temp_files = {}  # job_id -> list[path]
@@ -2623,6 +2624,14 @@ def create_app() -> FastAPI:
                         except ValueError:
                             pass
 
+                    # Skip cancelled jobs without running them
+                    if job_id in app.state.cancelled_jobs:
+                        app.state.cancelled_jobs.discard(job_id)
+                        store.mark_failed(job_id, "Cancelled by user")
+                        _update_local_cache(job_id, None, "failed")
+                        print(f"[API Server] Job {job_id} was cancelled before dispatch — skipped")
+                        continue
+
                     await _run_one_job(job_id, req)
 
                     # Notify OpenRouter waiters after job completion
@@ -3200,6 +3209,46 @@ def create_app() -> FastAPI:
 
         await q.put((rec.job_id, req))
         return _wrap_response({"task_id": rec.job_id, "status": "queued", "queue_position": position})
+
+    @app.post("/cancel_task")
+    async def cancel_task_endpoint(request: Request, authorization: Optional[str] = Header(None)):
+        """Cancel a queued or running generation job.
+
+        For queued jobs: marks as cancelled so the worker skips it when dequeued.
+        For running jobs: marks as failed immediately (mid-diffusion interrupt is not supported;
+        the running inference step will complete but the result will be discarded).
+        """
+        content_type = (request.headers.get("content-type") or "").lower()
+        if "json" in content_type:
+            body = await request.json()
+        else:
+            form = await request.form()
+            body = {k: v for k, v in form.items()}
+
+        verify_token_from_request(body, authorization)
+        job_id = body.get("job_id") or body.get("task_id")
+        if not job_id:
+            raise HTTPException(status_code=400, detail="'job_id' is required")
+
+        # Flag it so the worker skips it if still queued
+        app.state.cancelled_jobs.add(job_id)
+
+        # Also remove from pending_ids so queue position reporting is correct
+        async with app.state.pending_lock:
+            try:
+                app.state.pending_ids.remove(job_id)
+            except ValueError:
+                pass
+
+        # Mark the job store record immediately (covers running jobs too)
+        rec = store.get(job_id)
+        if rec and rec.status not in ("succeeded", "failed"):
+            store.mark_failed(job_id, "Cancelled by user")
+            _update_local_cache(job_id, None, "failed")
+            print(f"[API Server] Job {job_id} cancelled by user")
+
+        return _wrap_response({"job_id": job_id, "status": "cancelled"})
+
 
     @app.post("/query_result")
     async def query_result(request: Request, authorization: Optional[str] = Header(None)):

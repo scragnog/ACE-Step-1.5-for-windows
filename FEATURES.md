@@ -272,38 +272,84 @@ A collection of track list UX improvements, bug fixes, and a new bulk-delete fea
 ## Advanced Multi-Adapter System
 
 **Branch:** `feature/advanced-adapters`  
-**Status:** 🚧 In Progress
+**Status:** ✅ Merged
 
-Slot-based multi-adapter loading (up to 4 simultaneous LoRA/LoKr adapters) with per-slot scaling and per-module-group scaling (Self-Attn, Cross-Attn, MLP). Uses weight-space merging approach. Existing basic single-adapter UI is preserved — the advanced system is behind an opt-in "Advanced" checkbox.
+Slot-based multi-adapter loading (up to 4 simultaneous LoRA/LoKr adapters) with per-slot scaling, per-module-group scaling (Self-Attn, Cross-Attn, MLP), and per-layer scaling (layers 0–23). Uses weight-space merging approach. Existing basic single-adapter UI is preserved — the advanced system is behind an opt-in "Advanced" checkbox.
 
 ### What's included
 
 | File | Description |
 |------|-------------|
-| `acestep/core/generation/handler/lora/advanced_adapter_mixin.py` | **[NEW]** `AdvancedAdapterMixin` — delta extraction, weight-space merging (`base + Σ(scale × group_scale × delta)`), slot management |
+| `acestep/core/generation/handler/lora/advanced_adapter_mixin.py` | **[NEW]** `AdvancedAdapterMixin` — delta extraction, weight-space merging (`base + Σ(scale × group_scale × layer_scale × delta)`), slot management, per-layer scale API |
 | `acestep/core/generation/handler/lora_manager.py` | Import + export `AdvancedAdapterMixin` |
 | `acestep/handler.py` | Added `AdvancedAdapterMixin` to MRO, init state (`_adapter_slots`, `_next_slot_id`, `_merged_dirty`, `lora_group_scales`) |
-| `acestep/api_server.py` | 3 new endpoints, updated `load`/`unload` for slot param, new request models |
-| `ace-step-ui/server/src/routes/lora.ts` | 3 new routes: `GET /list-files` (folder scanner), `POST /group-scales`, `POST /slot-group-scales` |
-| `ace-step-ui/services/api.ts` | `listLoraFiles()`, `setGroupScales()`, `setSlotGroupScales()`, updated `loadLora`/`unloadLora` for slot support |
-| `ace-step-ui/components/CreatePanel.tsx` | Advanced toggle, folder browser, slot cards with per-slot scale + expandable per-group sliders |
+| `acestep/api_server.py` | 5 new endpoints, updated `load`/`unload` for slot param, new request models. `set_slot_layer_scales` and `set_slot_layer_scale` for per-layer control |
+| `ace-step-ui/server/src/routes/lora.ts` | 5 new routes: `GET /list-files`, `POST /group-scales`, `POST /slot-group-scales`, `POST /slot-layer-scales`, `POST /slot-layer-scale` |
+| `ace-step-ui/services/api.ts` | `listLoraFiles()`, `setGroupScales()`, `setSlotGroupScales()`, `setSlotLayerScales()`, updated `loadLora`/`unloadLora` for slot support |
+| `ace-step-ui/components/CreatePanel.tsx` | Advanced toggle, folder browser, slot cards. Debounced layer scale changes (500ms) with batch API calls sending full layer state |
+| `ace-step-ui/components/accordions/AdaptersAccordion.tsx` | Role Blend sliders (Voice/Style/Coherence), tooltip prop on EditableSlider, per-layer slider grid (0–23) |
 
 ### How it works
 
-1. Open the **LoRA** panel and check **Advanced (Multi-Adapter)**
+1. Open the **Adapters** panel and check **Advanced (Multi-Adapter)**
 2. Enter an adapter folder path → click **Scan** → available `.safetensors` files appear
 3. Click **Load** on any adapter → it's loaded into a slot, delta extracted via weight-space merging
 4. Each slot card shows: adapter name, type badge (LoRA/LoKr), overall scale slider (0–2)
-5. Expand **Groups** on a slot → independent Self-Attn, Cross-Attn, MLP sliders (0–2)
-6. Load additional adapters (up to 4) — all merge simultaneously: `decoder = base + Σ(slot_scale × group_scale × delta)`
-7. Per-adapter group scale settings are persisted in localStorage by adapter filename
-8. Uncheck "Advanced" → original basic single-adapter UI appears unchanged
+5. Expand **Groups** on a slot → independent Self-Attn, Cross-Attn, MLP sliders with inline descriptions and hover tooltips
+6. **Role Blend** sliders (always visible, below groups): 🎤 Voice (layers 0–7), 🎸 Style (layers 8–15), 🔗 Coherence (layers 16–23) — sets all layers in each group simultaneously
+7. Expand **Layers** on a slot → 24 individual layer sliders (0–23) for surgical control
+8. Load additional adapters (up to 4) — all merge simultaneously: `decoder = base + Σ(slot_scale × group_scale × layer_scale × delta)`
+9. Per-adapter group scale settings are persisted in localStorage by adapter filename
+10. Uncheck "Advanced" → original basic single-adapter UI appears unchanged
+
+### Role Blend sliders
+
+Empirical layer ablation experiments on this adapter revealed three functional layer groups:
+
+| Slider | Layers | What it controls |
+|--------|--------|------------------|
+| 🎤 **Voice** | 0–7 | Vocal timbre and singer identity (~60% of character) |
+| 🎸 **Style** | 8–15 | Musical energy, genre character, song-section phrasing |
+| 🔗 **Coherence** | 16–23 | Harmonic integration glue — binds voice and style into a coherent output |
+
+All three groups must have non-zero coherence to avoid harmonic discordance. Boosting Voice beyond ~1.5 causes clipping artifacts.
 
 ### Architecture note
 
-Basic mode uses PEFT runtime hooks (existing). Advanced mode uses **weight-space merging**: backs up base decoder to CPU (~1.5GB), extracts each adapter as a delta, applies `base + Σ(scaled deltas)` at inference. Re-merge takes ~1s on scale change.
+Basic mode uses PEFT runtime hooks (existing). Advanced mode uses **weight-space merging**: backs up base decoder to CPU (~1.5GB), extracts each adapter as a delta, applies `base + Σ(scaled deltas)` at inference. Re-merge takes ~1s on scale change. Layer scales are applied per-weight-key using `_extract_layer_index`, with non-layer weights using the average of the set layer scales.
 
 ---
+
+## Layer Ablation Lab
+
+**Branch:** `qinglong`  
+**Status:** ✅ Merged
+
+Developer tool for systematically exploring what each adapter layer contributes to the generated audio. Accessible via Developer Mode in the Create panel. Runs an automated sweep — generating one track per layer with that layer zeroed — to identify functional roles of each of the 24 transformer layers.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `ace-step-ui/components/accordions/LayerAblationPanel.tsx` | **[NEW]** Full ablation lab UI: layer scale sliders (0–23) with zero-selected/reset-all bulk ops, audio diff tool (compute RMS energy difference between two tracks), ablation sweep runner with progress + cancel |
+| `ace-step-ui/components/CreatePanel.tsx` | `handleStartSweep` / `handleCancelSweep`, sweep state management, `waitForGenerationDone` promise, `handleBulkLayerScalesChange` batch API call |
+| `acestep/api_server.py` | `compute_audio_diff` endpoint with `_resolve_audio_path` helper (handles HTTP URLs, relative paths, and API paths) |
+
+### How it works
+
+1. Enable **Developer Mode** → open the **Layer Ablation Lab** panel
+2. **Manual control:** 24 per-layer scale sliders. "Zero Selected" sets checked layers to 0; "Reset All" restores all to 1.0. Changes are debounced 500ms and sent as a single batch API call
+3. **Audio Diff:** Compare any two tracks using RMS energy — paste or pin track paths into the A/B fields and click Compute Diff to get an energy delta score
+4. **Ablation Sweep:** Click **Run Sweep** — the tool iterates through all 24 layers, zeroing each in turn, triggering a generation and waiting for it to complete before moving to the next. Results are titled `"Layer N zeroed - [prompt]"`. Cancel at any time
+5. The sweep output can be loaded into a spreadsheet to chart RMS energy vs. layer, revealing which layers have the most/least adapter influence
+
+### Interpreting results
+
+From empirical testing on a Green Day LoKr adapter:
+- **Layers 0–7 (Voice):** High-impact on singer timbre. Zeroing these makes the output sound significantly less like the adapter artist
+- **Layers 8–15 (Style):** Affects musical energy and genre coherence at the song-structure level. Coherent on their own; contribute to discordance when missing alongside other active groups  
+- **Layers 16–23 (Coherence):** The binding layer group. Their absence causes harmonic discordance even when voice and style layers are active. Preserve at ≥0.5 to avoid artifacts
+
 
 ## Creation Panel Reorganization
 
