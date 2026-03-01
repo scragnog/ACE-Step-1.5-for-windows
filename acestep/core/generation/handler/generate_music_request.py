@@ -245,6 +245,6 @@ class GenerateMusicRequestMixin:
             "repainting_end_batch": repainting_end_batch,
             "target_wavs_tensor": target_wavs_tensor,
             "audio_code_hints_batch": audio_code_hints_batch,
-            "should_return_intermediate": task_type == "text2music",
+            "should_return_intermediate": True,  # Always preserve intermediates for LRC timestamps
         }
 
