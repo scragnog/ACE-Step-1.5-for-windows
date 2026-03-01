@@ -2303,6 +2303,8 @@ def create_app() -> FastAPI:
                     use_cot_language=use_cot_language,  # Use local var (may be auto-disabled)
                     use_constrained_decoding=True,
                     get_lrc=req.get_lrc,
+                    get_scores=req.get_scores,
+                    score_scale=req.score_scale,
                     steering_enabled=req.steering_enabled,
                     steering_loaded=req.steering_loaded,
                     steering_alphas=req.steering_alphas,
