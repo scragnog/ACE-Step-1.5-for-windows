@@ -91,39 +91,66 @@ class LLMHandler:
 
     def unload(self) -> None:
         """Release LM weights/tokenizer and clear caches to free memory."""
+        import gc
         try:
-            if self.llm_backend == "vllm":
+            if self.llm_backend == "vllm" and self.llm is not None:
+                # Step 1: Signal the engine to exit (handles CUDA graph pool + distributed teardown)
                 try:
-                    if hasattr(self.llm, "reset"):
-                        self.llm.reset()
+                    if hasattr(self.llm, "exit"):
+                        self.llm.exit()
+                except Exception as e:
+                    print(f"[LLMHandler] Warning: llm.exit() failed: {e}")
+
+                # Step 2: Explicitly delete the model weights from the model runner.
+                # ModelRunner.exit() only drops CUDA graphs — it does NOT del self.model,
+                # so the weight tensors stay resident in VRAM until GC runs.  Force this now.
+                try:
+                    mr = getattr(self.llm, "model_runner", None)
+                    if mr is not None:
+                        if hasattr(mr, "model"):
+                            del mr.model
+                        if hasattr(mr, "kv_cache"):
+                            del mr.kv_cache
+                except Exception as e:
+                    print(f"[LLMHandler] Warning: explicit model weight deletion failed: {e}")
+
+                # Step 3: Clean up distributed state
+                self._cleanup_torch_distributed_state()
+
+            elif self.llm_backend in ("pt", None) and self.llm is not None:
+                # HuggingFace PT backend — drop model directly
+                try:
+                    del self.llm
                 except Exception:
                     pass
-                self._cleanup_torch_distributed_state()
-            self.llm = None
-            self.llm_tokenizer = None
-            self.constrained_processor = None
-            self.llm_initialized = False
-            self.llm_backend = None
-            self._mlx_model = None
-            self._mlx_model_path = None
-            try:
-                import gc
-                gc.collect()
-            except Exception:
-                pass
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            elif hasattr(torch, "mps") and torch.backends.mps.is_available():
-                if hasattr(torch.mps, "synchronize"):
-                    torch.mps.synchronize()
-                if hasattr(torch.mps, "empty_cache"):
-                    torch.mps.empty_cache()
-            elif hasattr(torch, "xpu") and torch.xpu.is_available():
-                torch.xpu.empty_cache()
-                torch.xpu.synchronize()
-        except Exception:
-            pass
+
+        except Exception as e:
+            print(f"[LLMHandler] Warning: unload error: {e}")
+
+        # Drop all handler references
+        self.llm = None
+        self.llm_tokenizer = None
+        self.constrained_processor = None
+        self.llm_initialized = False
+        self.llm_backend = None
+        self._mlx_model = None
+        self._mlx_model_path = None
+        self._hf_model_for_scoring = None
+
+        # Force Python GC then flush the CUDA cache
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+            if hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+        elif hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.empty_cache()
+            torch.xpu.synchronize()
+        print("[LLMHandler] Unloaded — VRAM cache flushed.")
 
     def _cleanup_torch_distributed_state(self) -> None:
         """Destroy default torch distributed process group when already initialized."""
