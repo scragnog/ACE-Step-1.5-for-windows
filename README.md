@@ -19,7 +19,7 @@ Total control over the generation pipeline with 7 unique mathematical guidance m
 Guide generation without expanding prompt length using isolated internal brain state direction vectors. Includes a UI component to compute steering vectors for multiple concepts at once, override base genres, fine-tune strength (alpha) and model layer targets on-the-fly, and remove vectors directly from disk. See the [Activation Steering Tutorial](docs/en/Activation_Steering_Tutorial.md).
 
 ### 🎛️ Advanced Multi-Adapter System
-Load up to **4 LoRA/LoKr adapters simultaneously** with independent per-slot scale sliders and per-module-group scaling (Self-Attn, Cross-Attn, MLP). Uses weight-space merging for zero-hook inference. Per-adapter settings persist across sessions. Includes a built-in **file browser** for scanning and loading `.safetensors` files from a configurable folder.
+Load up to **4 LoRA/LoKr adapters simultaneously** with independent per-slot scale sliders, per-module-group scaling (Self-Attn, Cross-Attn, MLP), and **per-layer scaling** (layers 0–23). The **Role Blend** panel exposes three human-friendly sliders used simultaneously — 🎤 **Voice** (layers 0–7), 🎸 **Style** (layers 8–15), and 🔗 **Coherence** (layers 16–23) — derived from empirical layer ablation experiments. Uses weight-space merging for zero-hook inference. Per-adapter settings persist across sessions. Includes a built-in **file browser** for scanning and loading `.safetensors` files from a configurable folder.
 
 ### 🚀 One-Click Launcher with Model Selection
 Double-click `LAUNCH.bat` → an interactive loading screen lets you choose which DiT and LM models to load via dropdowns (auto-populated from your `checkpoints/` folder). Changes are saved to `.env` before the Python API starts. A 5-second auto-continue timer proceeds automatically if you don't interact. All three services (Python API, Express backend, Vite frontend) are monitored and auto-redirect when ready.
@@ -66,6 +66,9 @@ Real-time **LRC lyrics overlay** on the art box visualizer synced to playback. A
 
 ### 🎨 Visualizer Preset Selection
 Choose which visualizer presets are included in random rotation via a checkbox grid in **Settings → Visualizer**. Multiple visualizer instances (art box, song list background, fullscreen) coordinate to never show the same preset simultaneously. Default pool: NCS Circle, Spectrum, Mirror, Analog.
+
+### 🔬 Layer Ablation Lab *(Developer Mode)*
+Systematically explore what each adapter layer contributes to the generated audio. An automated **Ablation Sweep** generates one track per transformer layer (layers 0–23) with that layer zeroed, allowing you to chart RMS energy delta vs. layer index and identify voice, style, and coherence roles. Manual per-layer sliders, bulk zero/reset controls, and an **Audio Diff** tool (RMS energy comparison between two tracks) are also included.
 
 ### 📂 Native Folder Picker
 The **Browse** buttons on both basic and advanced adapter panels now open a native Windows folder picker dialog, allowing you to select any folder on disk. The selected path is written directly into the adapter folder input.
