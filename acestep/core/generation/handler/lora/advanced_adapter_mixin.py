@@ -109,10 +109,13 @@ def _extract_adapter_delta(self, lora_path: str) -> dict:
     if is_peft:
         from peft import PeftModel
 
+        # Move to CPU for PEFT loading — same CUDA graph guard as LoKR below
+        original_device = self.device
+        self.model.decoder = self.model.decoder.cpu()
         self.model.decoder = PeftModel.from_pretrained(
             self.model.decoder, lora_path, is_trainable=False,
         )
-        self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+        self.model.decoder = self.model.decoder.to(original_device).to(self.dtype)
         self.model.decoder.eval()
         self.model.decoder = self.model.decoder.merge_and_unload()
         adapter_type = "peft_lora"
@@ -157,10 +160,16 @@ def _extract_adapter_delta(self, lora_path: str) -> dict:
             if fwd or pre:
                 pre_hooks[name] = (fwd, pre)
 
+        # Move model to CPU for lycoris injection — nano-vllm's CUDAGraph
+        # capture leaves the CUDA runtime in a state that blocks tensor.uniform_()
+        # calls during LokrModule parameter initialization.
+        original_device = self.device
+        self.model = self.model.cpu()
         self.model, lycoris_net, _ = inject_lokr_into_dit(self.model, lokr_cfg)
         # Load weights directly (bypasses safe_path which restricts to cwd)
         lycoris_net.load_weights(lokr_weights_path)
-        self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+        self.model = self.model.to(original_device)
+        self.model.decoder = self.model.decoder.to(self.dtype)
         self.model.decoder.eval()
 
         # LyCORIS uses forward hooks — merge_to() bakes effect into weights
