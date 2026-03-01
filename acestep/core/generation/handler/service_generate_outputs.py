@@ -3,6 +3,7 @@
 from typing import Any, Dict
 
 import torch
+from loguru import logger
 
 
 class ServiceGenerateOutputsMixin:
@@ -21,6 +22,7 @@ class ServiceGenerateOutputsMixin:
         """Attach intermediate tensors required by downstream consumers."""
         outputs["spans"] = payload["spans"]
         if not return_intermediate:
+            logger.debug("[service_generate_outputs] return_intermediate=False, skipping LRC tensors")
             return outputs
 
         outputs["src_latents"] = payload["src_latents"]
