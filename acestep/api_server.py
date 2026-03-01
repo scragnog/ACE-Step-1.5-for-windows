@@ -678,6 +678,26 @@ class SetSlotGroupScalesRequest(BaseModel):
     mlp: float = Field(default=1.0, ge=0.0, le=2.0, description="MLP/feed-forward group scale")
 
 
+class SetSlotLayerScalesRequest(BaseModel):
+    slot: int = Field(..., description="Slot number (0-3)")
+    layer_scales: Dict[int, float] = Field(default_factory=dict, description="Layer index (0-23) -> scale (0.0-2.0). Omitted layers default to 1.0")
+
+
+class SetSlotLayerScaleRequest(BaseModel):
+    slot: int = Field(..., description="Slot number (0-3)")
+    layer: int = Field(..., ge=0, le=23, description="Layer index (0-23)")
+    scale: float = Field(..., ge=0.0, le=2.0, description="Scale value")
+
+
+class SetTemporalScheduleRequest(BaseModel):
+    """Set or clear a temporal adapter schedule for multi-singer switching."""
+    clear: bool = Field(default=False, description="Set true to clear the schedule")
+    slot_segments: Optional[Dict[int, List[Dict]]] = Field(
+        default=None,
+        description="Dict mapping slot ID to list of segments. Each segment: {start, end, scale, fade_in?, fade_out?}",
+    )
+
+
 class UnloadLoRARequest(BaseModel):
     slot: Optional[int] = Field(default=None, description="Slot to unload (None = unload all)")
 
@@ -3769,6 +3789,95 @@ def create_app() -> FastAPI:
                 return _wrap_response(None, code=400, error=result)
         except Exception as e:
             return _wrap_response(None, code=500, error=f"Failed to set slot group scales: {str(e)}")
+
+    @app.post("/v1/lora/slot-layer-scales")
+    async def set_slot_layer_scales_endpoint(request: SetSlotLayerScalesRequest, _: None = Depends(verify_api_key)):
+        """Set per-layer LoRA scales for a specific adapter slot."""
+        handler: AceStepHandler = app.state.handler
+
+        if handler is None or handler.model is None:
+            raise HTTPException(status_code=500, detail="Model not initialized")
+
+        try:
+            result = handler.set_slot_layer_scales(
+                slot=request.slot,
+                layer_scales=request.layer_scales,
+            )
+            if result.startswith("✅"):
+                return _wrap_response({
+                    "message": result,
+                    "slot": request.slot,
+                    "layer_scales": request.layer_scales,
+                })
+            else:
+                return _wrap_response(None, code=400, error=result)
+        except Exception as e:
+            return _wrap_response(None, code=500, error=f"Failed to set slot layer scales: {str(e)}")
+
+    @app.post("/v1/lora/slot-layer-scale")
+    async def set_slot_layer_scale_endpoint(request: SetSlotLayerScaleRequest, _: None = Depends(verify_api_key)):
+        """Set scale for a single transformer layer on a specific adapter slot."""
+        handler: AceStepHandler = app.state.handler
+
+        if handler is None or handler.model is None:
+            raise HTTPException(status_code=500, detail="Model not initialized")
+
+        try:
+            result = handler.set_slot_layer_scale(
+                slot=request.slot,
+                layer=request.layer,
+                scale=request.scale,
+            )
+            if result.startswith("✅"):
+                return _wrap_response({
+                    "message": result,
+                    "slot": request.slot,
+                    "layer": request.layer,
+                    "scale": request.scale,
+                })
+            else:
+                return _wrap_response(None, code=400, error=result)
+        except Exception as e:
+            return _wrap_response(None, code=500, error=f"Failed to set slot layer scale: {str(e)}")
+
+    @app.post("/v1/lora/temporal-schedule")
+    async def set_temporal_schedule_endpoint(request: SetTemporalScheduleRequest, _: None = Depends(verify_api_key)):
+        """Set or clear a temporal adapter schedule for multi-singer switching."""
+        handler: AceStepHandler = app.state.handler
+
+        if handler is None or handler.model is None:
+            raise HTTPException(status_code=500, detail="Model not initialized")
+
+        try:
+            if request.clear or request.slot_segments is None:
+                result = handler.set_temporal_schedule(None)
+            else:
+                from acestep.core.generation.handler.lora.temporal_adapter_schedule import (
+                    AdapterSegment,
+                    TemporalAdapterSchedule,
+                )
+                slot_segs = {}
+                for sid_str, segs in request.slot_segments.items():
+                    sid = int(sid_str)
+                    slot_segs[sid] = [
+                        AdapterSegment(
+                            start=s.get("start", 0.0),
+                            end=s.get("end", 1.0),
+                            scale=s.get("scale", 1.0),
+                            fade_in=s.get("fade_in", 0.0),
+                            fade_out=s.get("fade_out", 0.0),
+                        )
+                        for s in segs
+                    ]
+                schedule = TemporalAdapterSchedule(slot_segments=slot_segs)
+                result = handler.set_temporal_schedule(schedule)
+
+            if result.startswith("✅"):
+                return _wrap_response({"message": result})
+            else:
+                return _wrap_response(None, code=400, error=result)
+        except Exception as e:
+            return _wrap_response(None, code=500, error=f"Failed to set temporal schedule: {str(e)}")
 
     @app.post("/v1/reinitialize")
     async def reinitialize_service(_: None = Depends(verify_api_key)):
