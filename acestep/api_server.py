@@ -1810,7 +1810,7 @@ def create_app() -> FastAPI:
                     # Extra fields for Discord bot
                     generation_info = result.get("generation_info", "")
                     seed_value = result.get("seed_value", "")
-                    lm_model = result.get("lm_model", "")
+                    lm_model = result.get("lm_model") or getattr(app.state, "_llm_model_path", "") or ""
                     dit_model = result.get("dit_model", "")
 
                     if audio_paths:
