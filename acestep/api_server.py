@@ -402,6 +402,7 @@ PARAM_ALIASES = {
     "track_name": ["track_name", "trackName"],
     "track_classes": ["track_classes", "trackClasses", "instruments"],
     "get_lrc": ["get_lrc", "getLrc"],
+    "lm_repetition_penalty": ["lm_repetition_penalty", "lmRepetitionPenalty"],
 }
 
 
@@ -2287,6 +2288,7 @@ def create_app() -> FastAPI:
                     lm_top_k=lm_top_k,
                     lm_top_p=lm_top_p,
                     lm_negative_prompt=req.lm_negative_prompt,
+                    lm_repetition_penalty=req.lm_repetition_penalty,
                     # use_cot_metas logic:
                     # - sample_mode: metas already generated, skip Phase 1
                     # - format with duration: metas already generated, skip Phase 1
