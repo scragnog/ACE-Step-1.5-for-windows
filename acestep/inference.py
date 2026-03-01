@@ -490,7 +490,7 @@ def generate_music(
                     temperature=params.lm_temperature,
                     cfg_scale=params.lm_cfg_scale,
                     negative_prompt=params.lm_negative_prompt,
-                    repetition_penalty=params.lm_repetition_penalty if params.lm_repetition_penalty > 1.0 else None,
+                    repetition_penalty=params.lm_repetition_penalty,
                     top_k=top_k_value,
                     top_p=top_p_value,
                     target_duration=audio_duration,  # Pass duration to limit audio codes generation
