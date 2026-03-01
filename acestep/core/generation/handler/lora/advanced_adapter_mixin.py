@@ -95,7 +95,11 @@ def _extract_adapter_delta(self, lora_path: str) -> dict:
     elif lora_path.endswith(".safetensors"):
         lokr_weights_path = lora_path
 
-    # Restore decoder to base state
+    # Reset dynamo state — nano-vllm's global config changes
+    # (capture_scalar_outputs, @torch.compile decorators) contaminate
+    # the compilation context, causing "Offset increment outside graph
+    # capture" when we modify decoder weights.
+    torch._dynamo.reset()
     self.model.decoder.load_state_dict(self._base_decoder, strict=False)
     self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
     self.model.decoder.eval()
@@ -295,6 +299,7 @@ def _apply_merged_weights(self) -> None:
         else:
             merged[k] = base_val
 
+    torch._dynamo.reset()
     self.model.decoder.load_state_dict(merged, strict=False)
     self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
     self.model.decoder.eval()
@@ -691,6 +696,7 @@ def _apply_merged_weights_temporal(self, schedule_scales: Dict[int, float]) -> N
     }
 
     if not active_slots:
+        torch._dynamo.reset()
         self.model.decoder.load_state_dict(self._base_decoder, strict=False)
         self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
         self.model.decoder.eval()
@@ -718,6 +724,7 @@ def _apply_merged_weights_temporal(self, schedule_scales: Dict[int, float]) -> N
         else:
             merged[k] = base_val
 
+    torch._dynamo.reset()
     self.model.decoder.load_state_dict(merged, strict=False)
     self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
     self.model.decoder.eval()
