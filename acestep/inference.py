@@ -478,7 +478,7 @@ def generate_music(
                 chunk_seeds = actual_seed_list[chunk_start:chunk_end] if chunk_start < len(actual_seed_list) else None
 
                 logger.info(f"LM chunk {chunk_idx+1}/{num_chunks} (infer_type={infer_type}) "
-                            f"(size: {chunk_size}, seeds: {chunk_seeds})")
+                            f"(size: {chunk_size}, seeds: {chunk_seeds}, rep_penalty: {params.lm_repetition_penalty})")
 
                 # Use the determined infer_type
                 # - "llm_dit" will internally run two phases (metas + codes)
@@ -799,7 +799,12 @@ def generate_music(
                     except Exception as e:
                         logger.warning(f"[generate_music] LRC generation error for sample {idx}: {e}")
             else:
-                logger.warning("[generate_music] LRC requested but extra_outputs missing required tensors")
+                missing = [name for name, val in [
+                    ("pred_latents", pred_latents), ("encoder_hidden_states", enc_hidden),
+                    ("encoder_attention_mask", enc_mask), ("context_latents", ctx_latents),
+                    ("lyric_token_idss", lyric_ids),
+                ] if val is None]
+                logger.warning(f"[generate_music] LRC requested but extra_outputs missing: {missing}")
 
         # Merge extra_outputs: include dit_extra_outputs (latents, masks) and add LM metadata
         extra_outputs = dit_extra_outputs.copy()
