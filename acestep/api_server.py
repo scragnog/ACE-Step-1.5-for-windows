@@ -2555,16 +2555,27 @@ def create_app() -> FastAPI:
                 # Append quality scores to generation info if present
                 scores = result.extra_outputs.get("scores")
                 if scores:
+                    # Helper: DiT alignment uses (cov²×mono²×conf), practical range ~0.03-0.40
+                    # Map to human-friendly quality label
+                    def _dit_label(v: float) -> str:
+                        if v >= 0.25: return "★★★★★ Excellent"
+                        if v >= 0.15: return "★★★★ Great"
+                        if v >= 0.08: return "★★★ Good"
+                        if v >= 0.04: return "★★ Fair"
+                        return "★ Low"
+
                     score_lines = ["\n📊 Quality Scores:"]
                     if "pmi" in scores:
                         pmi = scores["pmi"]
-                        score_lines.append(f"  PMI Global: {pmi['global']:.4f}")
+                        score_lines.append(f"  PMI: {pmi['global'] * 100:.0f}%")
                         for cond, val in sorted(pmi.get("per_condition", {}).items()):
-                            score_lines.append(f"    • {cond}: {val:.4f}")
+                            score_lines.append(f"    • {cond}: {val * 100:.0f}%")
                     if "dit_alignment" in scores:
                         da = scores["dit_alignment"]
-                        score_lines.append(f"  DiT Alignment (LM): {da['lm_score']:.4f}")
-                        score_lines.append(f"  DiT Alignment (DiT): {da['dit_score']:.4f}")
+                        lm_v = da['lm_score']
+                        dit_v = da['dit_score']
+                        score_lines.append(f"  Lyric Alignment (LM): {_dit_label(lm_v)} ({lm_v:.3f})")
+                        score_lines.append(f"  Lyric Alignment (DiT): {_dit_label(dit_v)} ({dit_v:.3f})")
                     generation_info += "\n".join(score_lines)
 
                 def _none_if_na_str(v: Any) -> Optional[str]:
