@@ -591,8 +591,18 @@ class LLMHandler:
             logger.info(f"Constrained processor initialized in {time.time() - processor_start:.2f} seconds")
 
             # Disable CUDA/HIP graph capture on ROCm (unverified on RDNA3 Windows)
+            # Also disable when flash_attn is missing — the SDPA fallback path
+            # creates massive intermediate tensors during graph capture (40GB+).
             is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
-            enforce_eager_for_vllm = bool(is_rocm)
+            try:
+                import flash_attn  # noqa: F401
+                has_flash_attn = True
+            except ImportError:
+                has_flash_attn = False
+            enforce_eager_for_vllm = bool(is_rocm) or not has_flash_attn
+            if not has_flash_attn:
+                logger.warning("flash_attn not installed — disabling CUDA graph capture (enforce_eager=True). "
+                               "Install flash_attn for faster LLM inference.")
 
             # Auto-detect best backend on Apple Silicon
             if backend == "mlx" or (backend == "vllm" and device == "mps"):
