@@ -211,6 +211,12 @@ class ServiceGenerateExecuteMixin:
                         outputs = self.model.generate_audio(**generate_kwargs)
                 else:
                     logger.info("[service_generate] DiT diffusion via PyTorch ({})...", self.device)
+                    # Inject temporal adapter callback if a schedule is active
+                    if hasattr(self, "build_temporal_step_callback"):
+                        cb = self.build_temporal_step_callback()
+                        if cb is not None:
+                            generate_kwargs["on_step_callback"] = cb
+                            logger.info("[service_generate] Temporal adapter schedule active")
                     outputs = self.model.generate_audio(**generate_kwargs)
 
         return outputs, encoder_hidden_states, encoder_attention_mask, context_latents

@@ -1838,6 +1838,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         guidance_mode: str = "apg",
         shift: float = 1.0,
         cover_noise_strength: float = 0.0,
+        on_step_callback=None,
         **kwargs,
     ):
         if attention_mask is None:
@@ -2047,6 +2048,10 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         logger.info(f"[generate_audio] Starting diffusion: solver={solver_name}, steps={infer_steps}, shift={shift}")
         with torch.no_grad():
             for step_idx, (t_curr, t_prev) in enumerate(iterator):
+                # Temporal adapter re-merge (if schedule callback is set)
+                if on_step_callback is not None:
+                    t_curr_f_cb = t_curr.item() if isinstance(t_curr, torch.Tensor) else float(t_curr)
+                    on_step_callback(step_idx=step_idx, t_curr=t_curr_f_cb, total_steps=infer_steps)
                 if step_idx >= cover_steps and not _switched_to_non_cover:
                     _switched_to_non_cover = True
                     if do_cfg_guidance:

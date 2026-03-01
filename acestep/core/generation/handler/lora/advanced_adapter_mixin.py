@@ -664,7 +664,131 @@ def get_advanced_lora_status(self) -> Dict[str, Any]:
         "active": self.use_lora,
         "slots": slots,
         "group_scales": dict(self.lora_group_scales),
+        "temporal_schedule_active": getattr(self, "_temporal_schedule", None) is not None,
     }
+
+
+# ------------------------------------------------------------------
+# Temporal adapter scheduling
+# ------------------------------------------------------------------
+
+def _apply_merged_weights_temporal(self, schedule_scales: Dict[int, float]) -> None:
+    """Merge adapter deltas using per-slot scales from a temporal schedule.
+
+    Like ``_apply_merged_weights_with_groups`` but each slot's effective scale
+    is overridden by ``schedule_scales[slot_id]`` for this particular diffusion
+    step.  Group scales and layer scales still apply multiplicatively on top.
+
+    Args:
+        schedule_scales: Mapping of slot ID → effective scale for this step.
+    """
+    if self._base_decoder is None:
+        return
+
+    active_slots = {
+        sid: s for sid, s in self._adapter_slots.items()
+        if schedule_scales.get(sid, 0.0) > 0 and self.use_lora
+    }
+
+    if not active_slots:
+        self.model.decoder.load_state_dict(self._base_decoder, strict=False)
+        self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+        self.model.decoder.eval()
+        return
+
+    merged = {}
+    all_keys = set()
+    for s in active_slots.values():
+        all_keys.update(s["delta"].keys())
+
+    for k in self._base_decoder:
+        base_val = self._base_decoder[k]
+        if k in all_keys:
+            group = _determine_group(k)
+            layer_idx = _extract_layer_index(k)
+            combined = base_val.float()
+            for sid, s in active_slots.items():
+                if k in s["delta"]:
+                    slot_scale = schedule_scales.get(sid, 0.0)
+                    g_scale = s.get("group_scales", {}).get(group, 1.0)
+                    l_scales = s.get("layer_scales", {})
+                    l_scale = l_scales.get(layer_idx, 1.0) if layer_idx is not None and l_scales else 1.0
+                    combined = combined + slot_scale * g_scale * l_scale * s["delta"][k]
+            merged[k] = combined.to(dtype=base_val.dtype)
+        else:
+            merged[k] = base_val
+
+    self.model.decoder.load_state_dict(merged, strict=False)
+    self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+    self.model.decoder.eval()
+    del merged
+
+
+def set_temporal_schedule(self, schedule) -> str:
+    """Set or clear the temporal adapter schedule for the next generation.
+
+    Args:
+        schedule: A :class:`TemporalAdapterSchedule` instance, or ``None``
+            to clear any active schedule (return to static merge).
+
+    Returns:
+        Status message.
+    """
+    if schedule is None:
+        self._temporal_schedule = None
+        # Restore static merged weights
+        if self._adapter_slots and self.use_lora:
+            _apply_merged_weights_with_groups(self)
+        return "✅ Temporal schedule cleared — using static adapter weights"
+
+    issues = schedule.validate()
+    if issues:
+        return f"❌ Invalid schedule: {'; '.join(issues)}"
+
+    # Check that referenced slots exist
+    missing = [sid for sid in schedule.slot_segments if sid not in self._adapter_slots]
+    if missing:
+        return f"❌ Schedule references slots {missing} which are not loaded. Active: {list(self._adapter_slots.keys())}"
+
+    self._temporal_schedule = schedule
+    slot_desc = ", ".join(
+        f"slot{sid}={len(segs)} segs" for sid, segs in schedule.slot_segments.items()
+    )
+    return f"✅ Temporal schedule set: {slot_desc}"
+
+
+def build_temporal_step_callback(self):
+    """Build a callback for the diffusion loop that re-merges weights per step.
+
+    Returns ``None`` if no temporal schedule is active. Otherwise returns a
+    callable ``callback(step_idx, t_curr, total_steps)`` that the diffusion
+    loop should invoke before each decoder forward pass.
+    """
+    schedule = getattr(self, "_temporal_schedule", None)
+    if schedule is None:
+        return None
+
+    def _on_step(step_idx: int, t_curr: float, total_steps: int):
+        """Re-merge adapter weights for this diffusion step."""
+        # Map diffusion step to normalised song position.
+        # Diffusion goes from t=1.0 → t=0.0, so step 0 is t≈1 and last step
+        # is t≈0.  Song position should be the reverse: step 0 is song start.
+        # However, the temporal schedule maps to *song content position*, not
+        # to diffusion timestep.  During diffusion, ALL positions are refined
+        # simultaneously — there's no per-frame temporal ordering.
+        #
+        # Instead, we map the diffusion step linearly across the schedule:
+        # step 0 / total → 0.0, last step → 1.0.  This spreads the adapter
+        # influence evenly across diffusion steps.
+        if total_steps > 1:
+            position = step_idx / (total_steps - 1)
+        else:
+            position = 0.5
+
+        scales = schedule.get_effective_scales(position)
+        _apply_merged_weights_temporal(self, scales)
+
+    return _on_step
 
 
 class AdvancedAdapterMixin:
@@ -674,11 +798,13 @@ class AdvancedAdapterMixin:
     - model, device, dtype, quantization
     - _base_decoder, use_lora, lora_loaded
     - _adapter_slots, _next_slot_id, _merged_dirty, lora_group_scales
+    - _temporal_schedule (Optional[TemporalAdapterSchedule])
     """
 
     _extract_adapter_delta = _extract_adapter_delta
     _apply_merged_weights_advanced = _apply_merged_weights
     _apply_merged_weights_with_groups = _apply_merged_weights_with_groups
+    _apply_merged_weights_temporal = _apply_merged_weights_temporal
 
     load_lora_slot = load_lora_slot
     unload_lora_slot = unload_lora_slot
@@ -688,4 +814,6 @@ class AdvancedAdapterMixin:
     set_slot_group_scales = set_slot_group_scales
     set_slot_layer_scales = set_slot_layer_scales
     set_slot_layer_scale = set_slot_layer_scale
+    set_temporal_schedule = set_temporal_schedule
+    build_temporal_step_callback = build_temporal_step_callback
     get_advanced_lora_status = get_advanced_lora_status
