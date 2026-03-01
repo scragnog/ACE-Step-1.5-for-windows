@@ -40,6 +40,22 @@ def _determine_group(module_name: str) -> str:
     return ""
 
 
+def _extract_layer_index(key: str) -> Optional[int]:
+    """Extract transformer layer index from a weight key.
+
+    Example: ``'layers.7.attn.qkv.weight'`` → ``7``.
+    Returns ``None`` if no layer index is found in the key.
+    """
+    parts = key.split(".")
+    for i, part in enumerate(parts):
+        if part == "layers" and i + 1 < len(parts):
+            try:
+                return int(parts[i + 1])
+            except ValueError:
+                pass
+    return None
+
+
 def _derive_adapter_name(lora_path: str, safetensors_file: Optional[str]) -> str:
     """Derive a human-readable adapter name from the path."""
     if safetensors_file:
@@ -330,11 +346,14 @@ def _apply_merged_weights_with_groups(self) -> None:
         base_val = self._base_decoder[k]
         if k in all_keys:
             group = _determine_group(k)
+            layer_idx = _extract_layer_index(k)
             combined = base_val.float()
             for s in active_slots.values():
                 if k in s["delta"]:
                     g_scale = s.get("group_scales", {}).get(group, 1.0)
-                    combined = combined + s["scale"] * g_scale * s["delta"][k]
+                    l_scales = s.get("layer_scales", {})
+                    l_scale = l_scales.get(layer_idx, 1.0) if layer_idx is not None and l_scales else 1.0
+                    combined = combined + s["scale"] * g_scale * l_scale * s["delta"][k]
             merged[k] = combined.to(dtype=base_val.dtype)
         else:
             merged[k] = base_val
@@ -416,6 +435,7 @@ def load_lora_slot(self, lora_path: str, slot: Optional[int] = None) -> str:
             "delta": result["delta"],
             "scale": 1.0,
             "group_scales": {"self_attn": 1.0, "cross_attn": 1.0, "mlp": 1.0},
+            "layer_scales": {},  # empty = all layers at 1.0
         }
 
         self.use_lora = True
@@ -570,6 +590,60 @@ def set_slot_group_scales(
     return f"✅ Slot {slot} ({name}) group scales: SA={sa:.0%} CA={ca:.0%} MLP={ml:.0%}"
 
 
+def set_slot_layer_scales(self, slot: int, layer_scales: Dict[int, float]) -> str:
+    """Set per-layer LoRA scales for a specific adapter slot.
+
+    Args:
+        slot: Slot ID.
+        layer_scales: Dict mapping layer index (0–23) to scale (0.0–2.0).
+            Unlisted layers default to 1.0.
+    """
+    if slot not in self._adapter_slots:
+        return f"❌ Slot {slot} not found. Active slots: {list(self._adapter_slots.keys())}"
+
+    clamped = {int(k): max(0.0, min(2.0, v)) for k, v in layer_scales.items()}
+    self._adapter_slots[slot]["layer_scales"] = clamped
+
+    if self.use_lora:
+        self._merged_dirty = True
+        _apply_merged_weights_with_groups(self)
+
+    name = self._adapter_slots[slot]["name"]
+    if clamped:
+        desc = ", ".join(f"L{k}={v:.0%}" for k, v in sorted(clamped.items()))
+    else:
+        desc = "all=100%"
+    return f"✅ Slot {slot} ({name}) layer scales: {desc}"
+
+
+def set_slot_layer_scale(self, slot: int, layer: int, scale: float) -> str:
+    """Set the scale for a single layer on a specific adapter slot.
+
+    Args:
+        slot: Slot ID.
+        layer: Transformer layer index (0–23).
+        scale: Scale value (0.0–2.0). Set to 1.0 to restore default.
+    """
+    if slot not in self._adapter_slots:
+        return f"❌ Slot {slot} not found. Active slots: {list(self._adapter_slots.keys())}"
+
+    layer = int(layer)
+    scale = max(0.0, min(2.0, scale))
+
+    l_scales = self._adapter_slots[slot].setdefault("layer_scales", {})
+    if abs(scale - 1.0) < 1e-6:
+        l_scales.pop(layer, None)  # Remove = restore default
+    else:
+        l_scales[layer] = scale
+
+    if self.use_lora:
+        self._merged_dirty = True
+        _apply_merged_weights_with_groups(self)
+
+    name = self._adapter_slots[slot]["name"]
+    return f"✅ Slot {slot} ({name}) layer {layer} scale: {scale:.0%}"
+
+
 def get_advanced_lora_status(self) -> Dict[str, Any]:
     """Get current advanced adapter status with slot and group details."""
     slots = []
@@ -582,6 +656,7 @@ def get_advanced_lora_status(self) -> Dict[str, Any]:
             "scale": s["scale"],
             "delta_keys": len(s["delta"]),
             "group_scales": s.get("group_scales", {"self_attn": 1.0, "cross_attn": 1.0, "mlp": 1.0}),
+            "layer_scales": s.get("layer_scales", {}),
         })
 
     return {
@@ -611,4 +686,6 @@ class AdvancedAdapterMixin:
     set_lora_slot_scale = set_lora_slot_scale
     set_lora_group_scales = set_lora_group_scales
     set_slot_group_scales = set_slot_group_scales
+    set_slot_layer_scales = set_slot_layer_scales
+    set_slot_layer_scale = set_slot_layer_scale
     get_advanced_lora_status = get_advanced_lora_status
