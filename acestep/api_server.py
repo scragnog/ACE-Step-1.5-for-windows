@@ -3890,20 +3890,41 @@ def create_app() -> FastAPI:
     async def audio_diff_endpoint(request: AudioDiffRequest, _: None = Depends(verify_api_key)):
         """Compute audio difference between two tracks for layer ablation analysis."""
         import os
-        if not os.path.isfile(request.reference_path):
-            return _wrap_response(None, code=400, error=f"Reference file not found: {request.reference_path}")
-        if not os.path.isfile(request.ablated_path):
-            return _wrap_response(None, code=400, error=f"Ablated file not found: {request.ablated_path}")
+
+        def _resolve_audio_path(p: str) -> str:
+            """Resolve HTTP audio URL paths to actual disk paths."""
+            project_root = _get_project_root()
+            if p.startswith("/audio/"):
+                # Express serves /audio/ from ace-step-ui/server/public/audio/
+                return os.path.join(project_root, "ace-step-ui", "server", "public", p.lstrip("/"))
+            elif p.startswith("/v1/audio"):
+                # Python API URL — extract path= query param
+                import urllib.parse as _urlparse
+                parsed = _urlparse.urlparse(p)
+                qs = _urlparse.parse_qs(parsed.query)
+                if "path" in qs:
+                    return qs["path"][0]
+            elif not p.startswith("http") and not os.path.isabs(p):
+                return os.path.join(project_root, p)
+            return p
+
+        reference_path = _resolve_audio_path(request.reference_path)
+        ablated_path = _resolve_audio_path(request.ablated_path)
+
+        if not os.path.isfile(reference_path):
+            return _wrap_response(None, code=400, error=f"Reference file not found: {reference_path}")
+        if not os.path.isfile(ablated_path):
+            return _wrap_response(None, code=400, error=f"Ablated file not found: {ablated_path}")
 
         try:
             from acestep.core.generation.handler.lora.ablation_service import compute_audio_diff
             # Generate output path next to ablated file
-            base = os.path.splitext(request.ablated_path)[0]
+            base = os.path.splitext(ablated_path)[0]
             output_path = f"{base}_diff.wav"
 
             result = compute_audio_diff(
-                reference_path=request.reference_path,
-                ablated_path=request.ablated_path,
+                reference_path=reference_path,
+                ablated_path=ablated_path,
                 output_path=output_path,
                 amplify=request.amplify,
             )
