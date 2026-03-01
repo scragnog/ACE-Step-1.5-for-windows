@@ -698,6 +698,13 @@ class SetTemporalScheduleRequest(BaseModel):
     )
 
 
+class AudioDiffRequest(BaseModel):
+    """Compute audio difference between reference and ablated tracks."""
+    reference_path: str = Field(..., description="Path to the reference audio file")
+    ablated_path: str = Field(..., description="Path to the ablated audio file")
+    amplify: float = Field(default=3.0, ge=1.0, le=20.0, description="Amplification factor for the diff signal")
+
+
 class UnloadLoRARequest(BaseModel):
     slot: Optional[int] = Field(default=None, description="Slot to unload (None = unload all)")
 
@@ -3878,6 +3885,31 @@ def create_app() -> FastAPI:
                 return _wrap_response(None, code=400, error=result)
         except Exception as e:
             return _wrap_response(None, code=500, error=f"Failed to set temporal schedule: {str(e)}")
+
+    @app.post("/v1/audio/diff")
+    async def audio_diff_endpoint(request: AudioDiffRequest, _: None = Depends(verify_api_key)):
+        """Compute audio difference between two tracks for layer ablation analysis."""
+        import os
+        if not os.path.isfile(request.reference_path):
+            return _wrap_response(None, code=400, error=f"Reference file not found: {request.reference_path}")
+        if not os.path.isfile(request.ablated_path):
+            return _wrap_response(None, code=400, error=f"Ablated file not found: {request.ablated_path}")
+
+        try:
+            from acestep.core.generation.handler.lora.ablation_service import compute_audio_diff
+            # Generate output path next to ablated file
+            base = os.path.splitext(request.ablated_path)[0]
+            output_path = f"{base}_diff.wav"
+
+            result = compute_audio_diff(
+                reference_path=request.reference_path,
+                ablated_path=request.ablated_path,
+                output_path=output_path,
+                amplify=request.amplify,
+            )
+            return _wrap_response(result)
+        except Exception as e:
+            return _wrap_response(None, code=500, error=f"Failed to compute audio diff: {str(e)}")
 
     @app.post("/v1/reinitialize")
     async def reinitialize_service(_: None = Depends(verify_api_key)):
