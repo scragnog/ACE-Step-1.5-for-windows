@@ -2618,6 +2618,14 @@ class LLMHandler:
                 # Get logits for the last position
                 next_token_logits = outputs.logits[:, -1, :]  # [batch_size, vocab_size]
 
+                # ── Logit diagnostic at first 3 steps ──
+                if step < 3:
+                    top5_vals, top5_ids = torch.topk(next_token_logits[0], 5)
+                    top5_tokens = [self.llm_tokenizer.decode([tid.item()]) for tid in top5_ids]
+                    logger.info(f"[LM DIAG] step={step} RAW logits top-5: "
+                               f"ids={top5_ids.tolist()}, vals={[f'{v:.4f}' for v in top5_vals.tolist()]}, "
+                               f"tokens={top5_tokens}")
+
                 # Apply constrained processor FIRST (modifies logits based on FSM state)
                 if constrained_processor is not None:
                     next_token_logits = constrained_processor(generated_ids, next_token_logits)
