@@ -2809,6 +2809,14 @@ class LLMHandler:
                     current_input_ids = generated_ids[cond_start_idx:cond_start_idx+batch_size]
                     cfg_logits = constrained_processor(current_input_ids, cfg_logits)
 
+                # ── Post-constrained logit diagnostic at first 3 steps ──
+                if step < 3:
+                    top5_vals, top5_ids = torch.topk(cfg_logits[0], 5)
+                    top5_tokens = [self.llm_tokenizer.decode([tid.item()]) for tid in top5_ids]
+                    logger.info(f"[LM DIAG] step={step} POST-CONSTRAINED top-5: "
+                               f"ids={top5_ids.tolist()}, vals={[f'{v:.4f}' for v in top5_vals.tolist()]}, "
+                               f"tokens={top5_tokens}")
+
                 # Apply logits processors (repetition penalty, top-k, top-p)
                 # Get current input_ids for repetition penalty (only conditional part)
                 current_input_ids = generated_ids[cond_start_idx:cond_start_idx+batch_size]
