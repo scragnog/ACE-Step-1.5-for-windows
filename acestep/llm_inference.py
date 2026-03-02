@@ -745,22 +745,11 @@ class LLMHandler:
             return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
 
     # ------------------------------------------------------------------
-    # LM LoRA adapter management (merge-and-unload approach)
-    #
-    # Instead of keeping PEFT hooks active (which adds per-token overhead
-    # and can cause tensor shape mismatches when scaling), we:
-    #   1. Cache the base model state_dict to CPU on first load
-    #   2. Apply the PEFT adapter, optionally scale it, then merge into
-    #      the base weights and discard the PEFT wrapper
-    #   3. On scale change: restore base weights → re-apply → re-merge
-    #   4. On unload: restore cached base weights
+    # LM LoRA adapter management (dynamic load / unload / scale)
     # ------------------------------------------------------------------
 
     def load_lm_lora(self, path: str, scale: float = 1.0) -> Tuple[str, bool]:
-        """Load a PEFT LoRA adapter by merging it into the base model weights.
-
-        The adapter is applied, optionally scaled, then baked into the weights
-        via merge_and_unload().  This gives zero per-token inference overhead.
+        """Dynamically load a PEFT LoRA adapter onto the already-initialized PT model.
 
         Args:
             path:  Directory containing the PEFT adapter (adapter_config.json etc.)
@@ -776,41 +765,24 @@ class LLMHandler:
             return f"❌ LM LoRA path not found: {path}", False
 
         try:
-            import time
-            t0 = time.time()
             from peft import PeftModel
+            # Unwrap existing PEFT adapter first if one is already loaded.
+            # NOTE: all HuggingFace PreTrainedModel subclasses expose a `base_model`
+            # property (it returns `self`), so hasattr() is always True and cannot be
+            # used to detect PEFT wrapping.  isinstance() is the correct check.
+            if isinstance(self.llm, PeftModel):
+                base = self.llm.base_model.model
+            else:
+                base = self.llm
 
-            # Get the bare base model (unwrap existing PEFT if present)
-            base = self._get_lm_base_model()
-
-            # Cache base weights on first load (needed for scale changes / unload)
-            if not hasattr(self, '_lm_base_state_dict') or self._lm_base_state_dict is None:
-                logger.info("[LLM] Caching base LM state_dict to CPU...")
-                self._lm_base_state_dict = {
-                    k: v.cpu().clone() for k, v in base.state_dict().items()
-                }
-                size_mb = sum(v.numel() * v.element_size() for v in self._lm_base_state_dict.values()) / 1e6
-                logger.info(f"[LLM] Base LM state cached ({size_mb:.1f}MB)")
-
-            # Apply PEFT adapter
-            peft_model = PeftModel.from_pretrained(base, path)
-
-            # Scale adapter if not 1.0
-            if scale != 1.0:
-                for _name, module in peft_model.named_modules():
-                    if hasattr(module, "scaling") and isinstance(module.scaling, dict):
-                        for adapter_name in list(module.scaling.keys()):
-                            module.scaling[adapter_name] *= scale
-
-            # Merge adapter weights into base and discard PEFT wrapper
-            self.llm = peft_model.merge_and_unload()
+            self.llm = PeftModel.from_pretrained(base, path)
             self.llm.eval()
-
             self.lm_lora_path = path
-            self._lm_lora_scale = scale
 
-            elapsed = time.time() - t0
-            msg = f"✅ LM LoRA merged: {path} (scale={scale:.2f}, {elapsed:.1f}s)"
+            if scale != 1.0:
+                self.set_lm_lora_scale(scale)
+
+            msg = f"✅ LM LoRA loaded: {path} (scale={scale:.2f})"
             logger.info(f"[LLM] {msg}")
             return msg, True
 
@@ -818,101 +790,56 @@ class LLMHandler:
             logger.warning(f"[LLM] Failed to load LM LoRA from {path}: {e}")
             return f"❌ Failed to load LM LoRA: {e}", False
 
-    def _get_lm_base_model(self):
-        """Return the unwrapped base model, stripping any PEFT wrapper."""
-        from peft import PeftModel
-        if isinstance(self.llm, PeftModel):
-            return self.llm.base_model.model
-        return self.llm
-
     def unload_lm_lora(self) -> str:
-        """Unload the LM LoRA adapter by restoring cached base weights."""
+        """Unload the LM LoRA adapter, restoring the bare base model."""
         if self.llm is None:
             return "No LM model loaded."
 
-        if not hasattr(self, '_lm_base_state_dict') or self._lm_base_state_dict is None:
+        if not hasattr(self.llm, "base_model"):
             self.lm_lora_path = None
-            return "No LM LoRA is currently loaded (no cached base weights)."
+            return "No LM LoRA is currently loaded."
 
         try:
-            import time
-            t0 = time.time()
-
-            # Restore original base weights
-            device = next(self.llm.parameters()).device
-            dtype = next(self.llm.parameters()).dtype
-            self.llm.load_state_dict({
-                k: v.to(device=device, dtype=dtype) for k, v in self._lm_base_state_dict.items()
-            })
-            self.llm.eval()
-
+            from peft import PeftModel
+            if isinstance(self.llm, PeftModel):
+                self.llm = self.llm.base_model.model
+                self.llm.eval()
             self.lm_lora_path = None
-            self._lm_lora_scale = 1.0
-
-            elapsed = time.time() - t0
-            msg = f"✅ LM LoRA unloaded — base weights restored ({elapsed:.1f}s)"
+            msg = "✅ LM LoRA unloaded — using base model."
             logger.info(f"[LLM] {msg}")
             return msg
-
         except Exception as e:
             logger.warning(f"[LLM] Failed to unload LM LoRA: {e}")
             return f"❌ Failed to unload LM LoRA: {e}"
 
     def set_lm_lora_scale(self, scale: float) -> str:
-        """Change the LM LoRA scale by re-merging from cached base weights.
+        """Update the LoRA adapter scale (strength) at runtime.
 
-        This restores the base model, re-applies the PEFT adapter at the new
-        scale, and merges again.  Slightly slower than a hook-based approach,
-        but avoids tensor shape corruption and keeps inference fast.
+        PEFT stores the scale per-layer in module.scaling[adapter_name].
+        Setting scale=1.0 restores the default (lora_alpha / r).
+        Setting scale=0.5 halves the adapter influence.
 
         Args:
-            scale: Scale factor.  1.0 = full. 0.0 = effectively base model.
+            scale: Scale factor.  1.0 = full. 0.0 = effectively disabled.
 
         Returns:
             Status message.
         """
-        if self.llm is None:
-            return "No LM model loaded — scale unchanged."
-
-        if not hasattr(self, 'lm_lora_path') or not self.lm_lora_path:
+        if self.llm is None or not hasattr(self.llm, "base_model"):
             return "No LM LoRA loaded — scale unchanged."
 
-        if not hasattr(self, '_lm_base_state_dict') or self._lm_base_state_dict is None:
-            return "No cached base weights — cannot rescale. Reload the LM LoRA."
-
         try:
-            import time
-            t0 = time.time()
+            updated = 0
+            for _name, module in self.llm.named_modules():
+                if hasattr(module, "scaling") and isinstance(module.scaling, dict):
+                    for adapter_name in list(module.scaling.keys()):
+                        module.scaling[adapter_name] = scale
+                        updated += 1
 
-            # Special case: scale=0 means "effectively unload"
-            if scale == 0.0:
-                return self.unload_lm_lora()
+            if updated == 0:
+                return "⚠️ No LoRA scaling layers found — adapter may not be loaded correctly."
 
-            path = self.lm_lora_path
-
-            # Restore base weights first
-            device = next(self.llm.parameters()).device
-            dtype = next(self.llm.parameters()).dtype
-            self.llm.load_state_dict({
-                k: v.to(device=device, dtype=dtype) for k, v in self._lm_base_state_dict.items()
-            })
-
-            # Re-apply PEFT at new scale and merge
-            from peft import PeftModel
-            peft_model = PeftModel.from_pretrained(self.llm, path)
-
-            if scale != 1.0:
-                for _name, module in peft_model.named_modules():
-                    if hasattr(module, "scaling") and isinstance(module.scaling, dict):
-                        for adapter_name in list(module.scaling.keys()):
-                            module.scaling[adapter_name] *= scale
-
-            self.llm = peft_model.merge_and_unload()
-            self.llm.eval()
-            self._lm_lora_scale = scale
-
-            elapsed = time.time() - t0
-            msg = f"✅ LM LoRA re-merged at scale={scale:.2f} ({elapsed:.1f}s)"
+            msg = f"✅ LM LoRA scale set to {scale:.2f} ({updated} layers updated)"
             logger.info(f"[LLM] {msg}")
             return msg
 

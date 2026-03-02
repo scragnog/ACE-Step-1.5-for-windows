@@ -87,16 +87,22 @@ class ConditioningTargetMixin:
             # If CoT generates a duration longer than silence_latent (e.g. 384s CoT vs
             # 300s silence_latent), silence_latent_tiled would silently truncate while
             # chunk_masks would keep the full length → RuntimeError in prepare_condition.
+            # Also must truncate individual latents and latent_lengths, otherwise
+            # `torch.zeros(max_latent_length - l)` gets a negative size → crash.
             silence_latent_capacity = self.silence_latent.shape[1]
             if max_latent_length > silence_latent_capacity:
                 from loguru import logger as _log
                 _log.warning(
                     f"[conditioning_target] max_latent_length={max_latent_length} exceeds "
                     f"silence_latent capacity={silence_latent_capacity}. "
-                    f"Clamping to avoid tensor shape mismatch. "
+                    f"Truncating to avoid tensor shape mismatch. "
                     f"(CoT may have requested a duration longer than the model supports.)"
                 )
                 max_latent_length = silence_latent_capacity
+                # Truncate individual latents to the clamped capacity
+                target_latents_list = [lat[:max_latent_length] for lat in target_latents_list]
+                # Clamp recorded lengths too — negative pad_length would crash zeros()
+                latent_lengths = [min(l, max_latent_length) for l in latent_lengths]
 
             silence_latent_tiled = self.silence_latent[0, :max_latent_length, :]
 
