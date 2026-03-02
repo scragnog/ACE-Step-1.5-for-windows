@@ -1820,6 +1820,7 @@ def create_app() -> FastAPI:
                     seed_value = result.get("seed_value", "")
                     lm_model = result.get("lm_model") or getattr(app.state, "_llm_model_path", "") or ""
                     dit_model = result.get("dit_model", "")
+                    audio_codes = result.get("audio_codes", "")
 
                     if audio_paths:
                         result_data = [
@@ -1836,6 +1837,7 @@ def create_app() -> FastAPI:
                                 "seed_value": seed_value,
                                 "lm_model": lm_model,
                                 "dit_model": dit_model,
+                                "audio_codes": audio_codes,
                                 "progress": 1.0,
                                 "stage": "succeeded",
                             }
@@ -1855,6 +1857,7 @@ def create_app() -> FastAPI:
                             "seed_value": seed_value,
                             "lm_model": lm_model,
                             "dit_model": dit_model,
+                            "audio_codes": audio_codes,
                             "progress": 1.0,
                             "stage": "succeeded",
                         }]
