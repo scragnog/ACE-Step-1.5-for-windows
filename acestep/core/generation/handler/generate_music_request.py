@@ -51,9 +51,14 @@ class GenerateMusicRequestMixin:
         audio_code_string: Union[str, List[str]],
         instruction: str,
     ) -> Tuple[str, str]:
-        """Auto-switch text2music to cover task when audio codes are provided."""
-        if task_type == "text2music" and self._has_non_empty_audio_codes(audio_code_string):
-            return "cover", TASK_INSTRUCTIONS["cover"]
+        """Resolve task type and instruction.
+
+        NOTE: We intentionally do NOT auto-switch text2music → cover when audio_codes
+        are provided. Audio codes supplied to text2music are LM token hints (used to
+        skip re-running the LM on upscale), not reference audio for a cover task.
+        Switching to cover would use the codes as reference audio and produce a
+        completely different song.
+        """
         return task_type, instruction
 
     def _prepare_generate_music_runtime(
