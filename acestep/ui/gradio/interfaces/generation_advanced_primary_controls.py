@@ -71,6 +71,38 @@ def build_lm_controls(service_mode: bool) -> dict[str, Any]:
     """
 
     with gr.Accordion(t("generation.advanced_lm_section"), open=False, elem_classes=["has-info-container"]):
+        # ── LM LoRA adapter ──────────────────────────────────────────
+        with gr.Row():
+            lm_lora_path = gr.Textbox(
+                label="LM LoRA Path",
+                placeholder="D:/Ace-Step-Latest/ace-lm-trainer/loras/my_artist/output/final",
+                info="Path to a trained LM LoRA adapter directory (from ace-lm-trainer). "
+                     "Requires pt backend. Enable Thinking for best results.",
+                scale=3,
+                elem_classes=["has-info-container"],
+            )
+            load_lm_lora_btn   = gr.Button("Load LM LoRA",   variant="secondary", scale=1, min_width=120)
+            unload_lm_lora_btn = gr.Button("Unload LM LoRA", variant="secondary", scale=1, min_width=120)
+        with gr.Row():
+            lm_lora_scale = gr.Slider(
+                minimum=0.0,
+                maximum=2.0,
+                value=1.0,
+                step=0.05,
+                label="LM LoRA Scale",
+                info="Blend strength of the LM adapter (1.0 = full, 0.0 = disabled, >1.0 = amplified).",
+                scale=2,
+                elem_classes=["has-info-container"],
+            )
+            lm_lora_status = gr.Textbox(
+                label="LM LoRA Status",
+                value="No LM LoRA loaded",
+                interactive=False,
+                lines=1,
+                scale=2,
+                elem_classes=["no-tooltip"],
+            )
+        # ── LM sampling ──────────────────────────────────────────────
         with gr.Row():
             lm_temperature = gr.Slider(
                 label=t("generation.lm_temperature_label"),
@@ -161,6 +193,11 @@ def build_lm_controls(service_mode: bool) -> dict[str, Any]:
             )
 
     return {
+        "lm_lora_path": lm_lora_path,
+        "load_lm_lora_btn": load_lm_lora_btn,
+        "unload_lm_lora_btn": unload_lm_lora_btn,
+        "lm_lora_scale": lm_lora_scale,
+        "lm_lora_status": lm_lora_status,
         "lm_temperature": lm_temperature,
         "lm_cfg_scale": lm_cfg_scale,
         "lm_top_k": lm_top_k,

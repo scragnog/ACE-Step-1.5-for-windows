@@ -149,6 +149,24 @@ def register_generation_service_handlers(
         outputs=[generation_section["lora_status"]],
     )
 
+    # ========== LM LoRA Handlers ==========
+    generation_section["load_lm_lora_btn"].click(
+        fn=lambda path, scale: llm_handler.load_lm_lora(path, scale),
+        inputs=[generation_section["lm_lora_path"], generation_section["lm_lora_scale"]],
+        outputs=[generation_section["lm_lora_status"]],
+    )
+
+    generation_section["unload_lm_lora_btn"].click(
+        fn=llm_handler.unload_lm_lora,
+        outputs=[generation_section["lm_lora_status"]],
+    )
+
+    generation_section["lm_lora_scale"].change(
+        fn=llm_handler.set_lm_lora_scale,
+        inputs=[generation_section["lm_lora_scale"]],
+        outputs=[generation_section["lm_lora_status"]],
+    )
+
     # ========== Auto Checkbox Handlers ==========
     auto_field_map = {
         "bpm_auto": ("bpm", "bpm"),

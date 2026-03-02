@@ -89,6 +89,9 @@ class LLMHandler:
         self._mlx_model = None
         self._mlx_model_path = None
 
+        # LM LoRA adapter (PEFT) loaded on top of the PT model
+        self.lm_lora_path: Optional[str] = None
+
     def unload(self) -> None:
         """Release LM weights/tokenizer and clear caches to free memory."""
         import gc
@@ -385,7 +388,7 @@ class LLMHandler:
                 caption, lyrics, is_negative_prompt=True, generation_phase="cot", negative_prompt=negative_prompt
             )
 
-    def _load_pytorch_model(self, model_path: str, device: str) -> Tuple[bool, str]:
+    def _load_pytorch_model(self, model_path: str, device: str, lm_lora_path: Optional[str] = None) -> Tuple[bool, str]:
         """Load PyTorch model from path and return (success, status_message)"""
         try:
             self.llm = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
@@ -394,10 +397,23 @@ class LLMHandler:
             else:
                 self.llm = self.llm.to("cpu").to(self.dtype)
             self.llm.eval()
+
+            if lm_lora_path:
+                try:
+                    from peft import PeftModel
+                    self.llm = PeftModel.from_pretrained(self.llm, lm_lora_path)
+                    self.llm.eval()
+                    self.lm_lora_path = lm_lora_path
+                    logger.info(f"[LLM] LM LoRA adapter loaded from {lm_lora_path}")
+                except Exception as lora_err:
+                    logger.warning(f"[LLM] Failed to load LM LoRA from {lm_lora_path}: {lora_err}")
+                    self.lm_lora_path = None
+
             self.llm_backend = "pt"
             self.llm_initialized = True
-            logger.info(f"5Hz LM initialized successfully using PyTorch backend on {device}")
-            status_msg = f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nBackend: PyTorch\nDevice: {device}"
+            lora_note = f" + LoRA: {lm_lora_path}" if self.lm_lora_path else ""
+            logger.info(f"5Hz LM initialized successfully using PyTorch backend on {device}{lora_note}")
+            status_msg = f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nBackend: PyTorch\nDevice: {device}{lora_note}"
             return True, status_msg
         except Exception as e:
             return False, f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
@@ -491,6 +507,7 @@ class LLMHandler:
         device: str = "auto",
         offload_to_cpu: bool = False,
         dtype: Optional[torch.dtype] = None,
+        lm_lora_path: Optional[str] = None,
     ) -> Tuple[str, bool]:
         """
         Initialize 5Hz LM model
@@ -502,6 +519,8 @@ class LLMHandler:
             device: Device type ("auto", "cuda", "mps", "xpu", or "cpu")
             offload_to_cpu: Whether to offload to CPU
             dtype: Data type (if None, auto-detect based on device)
+            lm_lora_path: Optional path to a PEFT LoRA adapter directory. Forces
+                          PT backend (vLLM does not support PEFT adapters).
 
         Returns:
             (status_message, success)
@@ -665,6 +684,14 @@ class LLMHandler:
                 )
                 backend = "pt"
 
+            # LM LoRA requires PyTorch backend — vLLM does not support PEFT adapters
+            if lm_lora_path and backend == "vllm":
+                logger.warning(
+                    "[initialize] LM LoRA adapter specified — vLLM does not support PEFT adapters. "
+                    "Forcing PyTorch backend."
+                )
+                backend = "pt"
+
             # Initialize based on user-selected backend
             if backend == "vllm":
                 _warn_if_prerelease_python()
@@ -684,7 +711,7 @@ class LLMHandler:
                     logger.warning(
                         f"vLLM disabled due to insufficient free VRAM (total={total_gb:.2f}GB, free={free_gb:.2f}GB, need>={VRAM_SAFE_FREE_GB}GB free) — falling back to PyTorch backend"
                     )
-                    success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
+                    success, status_msg = self._load_pytorch_model(full_lm_model_path, device, lm_lora_path)
                     if not success:
                         return status_msg, False
                     status_msg = f"✅ 5Hz LM initialized successfully (PyTorch fallback)\nModel: {full_lm_model_path}\nBackend: PyTorch"
@@ -703,12 +730,12 @@ class LLMHandler:
                                     return mlx_status, True
                                 logger.warning(f"MLX also failed: {mlx_status}, falling back to PyTorch")
                             logger.warning("Falling back to PyTorch backend")
-                            success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
+                            success, status_msg = self._load_pytorch_model(full_lm_model_path, device, lm_lora_path)
                             if not success:
                                 return status_msg, False
                             status_msg = f"✅ 5Hz LM initialized successfully (PyTorch fallback)\nModel: {full_lm_model_path}\nBackend: PyTorch"
             elif backend != "mlx":
-                success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
+                success, status_msg = self._load_pytorch_model(full_lm_model_path, device, lm_lora_path)
                 if not success:
                     return status_msg, False
 
@@ -716,6 +743,107 @@ class LLMHandler:
 
         except Exception as e:
             return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
+
+    # ------------------------------------------------------------------
+    # LM LoRA adapter management (dynamic load / unload / scale)
+    # ------------------------------------------------------------------
+
+    def load_lm_lora(self, path: str, scale: float = 1.0) -> Tuple[str, bool]:
+        """Dynamically load a PEFT LoRA adapter onto the already-initialized PT model.
+
+        Args:
+            path:  Directory containing the PEFT adapter (adapter_config.json etc.)
+            scale: Adapter scale factor (1.0 = full strength).
+
+        Returns:
+            (status_message, success)
+        """
+        if self.llm_backend != "pt" or self.llm is None:
+            return "❌ LM LoRA requires the PyTorch backend. Switch backend and re-initialize.", False
+
+        if not os.path.exists(path):
+            return f"❌ LM LoRA path not found: {path}", False
+
+        try:
+            from peft import PeftModel
+            # Unwrap existing adapter first if already loaded
+            if hasattr(self.llm, "base_model"):
+                base = self.llm.base_model.model
+            else:
+                base = self.llm
+
+            self.llm = PeftModel.from_pretrained(base, path)
+            self.llm.eval()
+            self.lm_lora_path = path
+
+            if scale != 1.0:
+                self.set_lm_lora_scale(scale)
+
+            msg = f"✅ LM LoRA loaded: {path} (scale={scale:.2f})"
+            logger.info(f"[LLM] {msg}")
+            return msg, True
+
+        except Exception as e:
+            logger.warning(f"[LLM] Failed to load LM LoRA from {path}: {e}")
+            return f"❌ Failed to load LM LoRA: {e}", False
+
+    def unload_lm_lora(self) -> str:
+        """Unload the LM LoRA adapter, restoring the bare base model."""
+        if self.llm is None:
+            return "No LM model loaded."
+
+        if not hasattr(self.llm, "base_model"):
+            self.lm_lora_path = None
+            return "No LM LoRA is currently loaded."
+
+        try:
+            from peft import PeftModel
+            if isinstance(self.llm, PeftModel):
+                self.llm = self.llm.base_model.model
+                self.llm.eval()
+            self.lm_lora_path = None
+            msg = "✅ LM LoRA unloaded — using base model."
+            logger.info(f"[LLM] {msg}")
+            return msg
+        except Exception as e:
+            logger.warning(f"[LLM] Failed to unload LM LoRA: {e}")
+            return f"❌ Failed to unload LM LoRA: {e}"
+
+    def set_lm_lora_scale(self, scale: float) -> str:
+        """Update the LoRA adapter scale (strength) at runtime.
+
+        PEFT stores the scale per-layer in module.scaling[adapter_name].
+        Setting scale=1.0 restores the default (lora_alpha / r).
+        Setting scale=0.5 halves the adapter influence.
+
+        Args:
+            scale: Scale factor.  1.0 = full. 0.0 = effectively disabled.
+
+        Returns:
+            Status message.
+        """
+        if self.llm is None or not hasattr(self.llm, "base_model"):
+            return "No LM LoRA loaded — scale unchanged."
+
+        try:
+            updated = 0
+            for _name, module in self.llm.named_modules():
+                if hasattr(module, "scaling") and isinstance(module.scaling, dict):
+                    for adapter_name in list(module.scaling.keys()):
+                        module.scaling[adapter_name] = scale
+                        updated += 1
+
+            if updated == 0:
+                return "⚠️ No LoRA scaling layers found — adapter may not be loaded correctly."
+
+            msg = f"✅ LM LoRA scale set to {scale:.2f} ({updated} layers updated)"
+            logger.info(f"[LLM] {msg}")
+            return msg
+
+        except Exception as e:
+            logger.warning(f"[LLM] set_lm_lora_scale failed: {e}")
+            return f"❌ Failed to set LM LoRA scale: {e}"
+
 
     def _initialize_5hz_lm_vllm(self, model_path: str, enforce_eager: bool = False) -> str:
         """Initialize 5Hz LM model using vllm backend. When enforce_eager is True, CUDA graph
