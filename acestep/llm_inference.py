@@ -1071,6 +1071,24 @@ class LLMHandler:
                 logger.info(f"[LM DIAG] PEFT actual scaling values (sample): {unique_scales}")
                 logger.info(f"[LM DIAG] LoRA_A weight norms: count={len(lora_a_norms)}, avg={avg_a:.6f}, max={max_a:.6f}")
                 logger.info(f"[LM DIAG] LoRA_B weight norms: count={len(lora_b_norms)}, avg={avg_b:.6f}, max={max_b:.6f}")
+                # Check merged status and adapter name matching
+                merged_info = []
+                adapter_names_in_layers = set()
+                disable_flags = []
+                for name, module in self.llm.named_modules():
+                    if hasattr(module, 'merged_adapters'):
+                        merged_info.append(f"{name}: {module.merged_adapters}")
+                    if hasattr(module, 'merged') and isinstance(module.merged, dict):
+                        for k, v in module.merged.items():
+                            if v:
+                                merged_info.append(f"{name}.merged[{k}]=True")
+                    if hasattr(module, 'lora_A') and isinstance(module.lora_A, torch.nn.ModuleDict):
+                        adapter_names_in_layers.update(module.lora_A.keys())
+                    if hasattr(module, 'disable_adapters'):
+                        disable_flags.append(module.disable_adapters)
+                logger.info(f"[LM DIAG] Adapter names in layers: {adapter_names_in_layers}")
+                logger.info(f"[LM DIAG] Merged adapters (first 5): {merged_info[:5]}")
+                logger.info(f"[LM DIAG] disable_adapters flags (unique): {set(disable_flags)}")
             else:
                 logger.info("[LM DIAG] PEFT NOT active — running base model (no LoRA)")
         except ImportError:
