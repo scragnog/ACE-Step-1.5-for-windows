@@ -1172,6 +1172,17 @@ class LLMHandler:
                 )
             else:
                 # Generate without CFG using native generate() parameters
+                logger.info(f"[LM DIAG] Using NATIVE generate() path (cfg={cfg_scale}, constrained={use_constrained_decoding})")
+                # ── Quick logit probe: one forward pass to check raw model output ──
+                with torch.inference_mode():
+                    probe_out = self.llm(**inputs, use_cache=False)
+                    probe_logits = probe_out.logits[:, -1, :]
+                    top5_vals, top5_ids = torch.topk(probe_logits[0].float(), 5)
+                    top5_tokens = [self.llm_tokenizer.decode([tid.item()]) for tid in top5_ids]
+                    logger.info(f"[LM DIAG] PROBE logits top-5: "
+                               f"ids={top5_ids.tolist()}, vals={[f'{v:.4f}' for v in top5_vals.tolist()]}, "
+                               f"tokens={top5_tokens}")
+                    del probe_out, probe_logits
                 with torch.inference_mode():
                     outputs = self.llm.generate(
                         **inputs,
@@ -2738,6 +2749,14 @@ class LLMHandler:
                 # Apply CFG formula: cfg_logits = uncond_logits + cfg_scale * (cond_logits - uncond_logits)
                 # Upcast to float32 to prevent overflow in float16 (CFG scaling can exceed fp16 range)
                 cfg_logits = uncond_logits.float() + cfg_scale * (cond_logits.float() - uncond_logits.float())
+
+                # ── Logit diagnostic at first 3 steps (CFG path) ──
+                if step < 3:
+                    top5_vals, top5_ids = torch.topk(cfg_logits[0], 5)
+                    top5_tokens = [self.llm_tokenizer.decode([tid.item()]) for tid in top5_ids]
+                    logger.info(f"[LM DIAG] step={step} CFG logits top-5: "
+                               f"ids={top5_ids.tolist()}, vals={[f'{v:.4f}' for v in top5_vals.tolist()]}, "
+                               f"tokens={top5_tokens}")
 
                 # Apply constrained processor FIRST (modifies logits based on FSM state)
                 if constrained_processor is not None:
