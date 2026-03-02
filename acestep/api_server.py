@@ -2312,6 +2312,10 @@ def create_app() -> FastAPI:
                     steering_alphas=req.steering_alphas,
                 )
 
+                # DEBUG: trace audio_codes for upscale
+                _ac = params.audio_codes or ""
+                print(f"[API Server] 🔍 GenerationParams.audio_codes: {len(_ac)} chars, thinking={thinking}, first 80: {_ac[:80]!r}")
+
                 # Build GenerationConfig - default to 2 audios like gradio_ui
                 batch_size = req.batch_size if req.batch_size is not None else 2
 
