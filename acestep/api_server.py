@@ -3906,6 +3906,64 @@ def create_app() -> FastAPI:
             "message": f"✅ LM LoRA loaded: {path} (scale={scale:.2f})" if loaded else "No LM LoRA loaded",
         })
 
+    # ── Audio Code Logit Bias endpoints ──────────────────────────────────
+
+    @app.post("/v1/code-bias/load")
+    async def code_bias_load_endpoint(request: Request, _: None = Depends(verify_api_key)):
+        """Load an audio code logit bias file (.pt) for steering code generation."""
+        body = await request.json()
+        path = body.get("path") or ""
+        strength = float(body.get("strength", 1.0))
+
+        llm_handler = getattr(app.state, "llm_handler", None)
+        if llm_handler is None:
+            raise HTTPException(status_code=500, detail="LLM handler not initialized")
+
+        msg, success = llm_handler.load_code_bias(path, strength)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return _wrap_response({"message": msg, "path": path, "strength": strength})
+
+    @app.post("/v1/code-bias/unload")
+    async def code_bias_unload_endpoint(_: None = Depends(verify_api_key)):
+        """Unload the audio code logit bias."""
+        llm_handler = getattr(app.state, "llm_handler", None)
+        if llm_handler is None:
+            raise HTTPException(status_code=500, detail="LLM handler not initialized")
+
+        msg = llm_handler.unload_code_bias()
+        return _wrap_response({"message": msg})
+
+    @app.post("/v1/code-bias/strength")
+    async def code_bias_strength_endpoint(request: Request, _: None = Depends(verify_api_key)):
+        """Set the code bias strength multiplier."""
+        body = await request.json()
+        strength = float(body.get("strength", 1.0))
+
+        llm_handler = getattr(app.state, "llm_handler", None)
+        if llm_handler is None:
+            raise HTTPException(status_code=500, detail="LLM handler not initialized")
+
+        msg = llm_handler.set_code_bias_strength(strength)
+        return _wrap_response({"message": msg, "strength": strength})
+
+    @app.get("/v1/code-bias/status")
+    async def code_bias_status_endpoint(_: None = Depends(verify_api_key)):
+        """Return current code bias state."""
+        llm_handler = getattr(app.state, "llm_handler", None)
+        if llm_handler is None:
+            raise HTTPException(status_code=500, detail="LLM handler not initialized")
+
+        loaded = bool(getattr(llm_handler, "_code_bias_path", None))
+        path = getattr(llm_handler, "_code_bias_path", "") or ""
+        strength = getattr(llm_handler, "_code_bias_strength", 1.0)
+        return _wrap_response({
+            "loaded": loaded,
+            "path": path,
+            "strength": float(strength),
+            "message": f"✅ Code bias loaded: {path} (strength={strength:.2f})" if loaded else "No code bias loaded",
+        })
+
     @app.post("/v1/lora/group-scales")
     async def set_group_scales_endpoint(request: SetGroupScalesRequest, _: None = Depends(verify_api_key)):
         """Set per-module-group global scales for all adapter slots."""

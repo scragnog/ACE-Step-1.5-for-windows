@@ -92,6 +92,11 @@ class LLMHandler:
         # LM LoRA adapter (PEFT) loaded on top of the PT model
         self.lm_lora_path: Optional[str] = None
 
+        # Audio code logit bias (applied during codes generation phase)
+        self._code_bias_tensor: Optional[torch.Tensor] = None  # [1, vocab_size]
+        self._code_bias_strength: float = 1.0
+        self._code_bias_path: Optional[str] = None
+
     def unload(self) -> None:
         """Release LM weights/tokenizer and clear caches to free memory."""
         import gc
@@ -850,6 +855,76 @@ class LLMHandler:
             logger.warning(f"[LLM] set_lm_lora_scale failed: {e}")
             return f"❌ Failed to set LM LoRA scale: {e}"
 
+
+    # ── Audio Code Logit Bias ──
+
+    def load_code_bias(self, path: str, strength: float = 1.0) -> Tuple[str, bool]:
+        """Load an audio code logit bias file (.pt) produced by compute_bias.py."""
+        import os
+        if not os.path.exists(path):
+            return f"❌ File not found: {path}", False
+        try:
+            data = torch.load(path, map_location="cpu", weights_only=False)
+            bias_dict = data["bias"]  # Dict[int, float]
+            metadata = data.get("metadata", {})
+
+            # Determine vocab size
+            vocab_size = None
+            if self.llm_tokenizer is not None:
+                vocab_size = len(self.llm_tokenizer)
+            elif self.llm is not None and hasattr(self.llm, 'config'):
+                vocab_size = getattr(self.llm.config, 'vocab_size', None)
+            if vocab_size is None:
+                vocab_size = max(bias_dict.keys()) + 1
+
+            # Build dense bias tensor [1, vocab_size]
+            bias_tensor = torch.zeros(1, vocab_size, dtype=torch.float32)
+            for token_id, bias_val in bias_dict.items():
+                if 0 <= token_id < vocab_size:
+                    bias_tensor[0, token_id] = bias_val
+
+            self._code_bias_tensor = bias_tensor
+            self._code_bias_strength = strength
+            self._code_bias_path = path
+
+            n_tokens = metadata.get('unique_tokens', len(bias_dict))
+            msg = (f"✅ Code bias loaded: {n_tokens} tokens, "
+                   f"range=[{metadata.get('bias_min', '?'):.3f}, {metadata.get('bias_max', '?'):.3f}], "
+                   f"strength={strength:.2f}")
+            logger.info(f"[LLM] {msg}")
+            return msg, True
+
+        except Exception as e:
+            logger.error(f"[LLM] Failed to load code bias: {e}")
+            return f"❌ Failed to load code bias: {e}", False
+
+    def unload_code_bias(self) -> str:
+        """Remove the loaded code bias."""
+        self._code_bias_tensor = None
+        self._code_bias_path = None
+        msg = "Code bias unloaded."
+        logger.info(f"[LLM] {msg}")
+        return msg
+
+    def set_code_bias_strength(self, strength: float) -> str:
+        """Adjust the code bias strength multiplier."""
+        self._code_bias_strength = strength
+        msg = f"✅ Code bias strength set to {strength:.2f}"
+        logger.info(f"[LLM] {msg}")
+        return msg
+
+    def _apply_code_bias(self, logits: torch.Tensor) -> torch.Tensor:
+        """Add the code bias to logits if loaded and strength > 0."""
+        if self._code_bias_tensor is None or self._code_bias_strength == 0:
+            return logits
+        bias = self._code_bias_tensor
+        if bias.device != logits.device or bias.dtype != logits.dtype:
+            bias = bias.to(device=logits.device, dtype=logits.dtype)
+            self._code_bias_tensor = bias
+        # Clamp to avoid OOB if vocab sizes differ
+        v = min(logits.shape[-1], bias.shape[-1])
+        logits[..., :v] = logits[..., :v] + bias[..., :v] * self._code_bias_strength
+        return logits
 
     def _initialize_5hz_lm_vllm(self, model_path: str, enforce_eager: bool = False) -> str:
         """Initialize 5Hz LM model using vllm backend. When enforce_eager is True, CUDA graph
@@ -2687,6 +2762,9 @@ class LLMHandler:
                 if constrained_processor is not None:
                     next_token_logits = constrained_processor(generated_ids, next_token_logits)
 
+                # Apply audio code logit bias (after constrained processor masks non-audio tokens)
+                next_token_logits = self._apply_code_bias(next_token_logits)
+
                 # Apply other logits processors (repetition penalty)
                 for processor in logits_processor:
                     next_token_logits = processor(generated_ids, next_token_logits)
@@ -2818,6 +2896,9 @@ class LLMHandler:
                                f"tokens={top5_tokens}")
 
                 # Apply logits processors (repetition penalty, top-k, top-p)
+                # But first apply audio code logit bias
+                cfg_logits = self._apply_code_bias(cfg_logits)
+
                 # Get current input_ids for repetition penalty (only conditional part)
                 current_input_ids = generated_ids[cond_start_idx:cond_start_idx+batch_size]
                 for processor in logits_processor:
