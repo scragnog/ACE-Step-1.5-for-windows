@@ -778,12 +778,13 @@ class LLMHandler:
             self.llm = PeftModel.from_pretrained(base, path)
             self.llm.eval()
             self.lm_lora_path = path
+            self._lm_lora_scale = scale
 
             if scale != 1.0:
                 self.set_lm_lora_scale(scale)
 
             msg = f"✅ LM LoRA loaded: {path} (scale={scale:.2f})"
-            logger.info(f"[LLM] {msg}")
+            logger.info(f"[LM] {msg}")
             return msg, True
 
         except Exception as e:
@@ -805,6 +806,7 @@ class LLMHandler:
                 self.llm = self.llm.base_model.model
                 self.llm.eval()
             self.lm_lora_path = None
+            self._lm_lora_scale = 1.0
             msg = "✅ LM LoRA unloaded — using base model."
             logger.info(f"[LLM] {msg}")
             return msg
@@ -841,6 +843,7 @@ class LLMHandler:
 
             msg = f"✅ LM LoRA scale set to {scale:.2f} ({updated} layers updated)"
             logger.info(f"[LLM] {msg}")
+            self._lm_lora_scale = scale
             return msg
 
         except Exception as e:
@@ -1491,6 +1494,26 @@ class LLMHandler:
             logger.info("Phase 2: Generating audio codes...")
         phase2_start = time.time()
 
+        # Override target_duration with the CoT-extracted duration when the
+        # user didn't specify one (target_duration <= 0 / None).  Without this,
+        # Phase 2 falls back to the model's max_new_tokens (4096 → ~819 s, then
+        # the constrained decoder caps at DURATION_MAX=600 s → always 10 min).
+        effective_target_duration = target_duration
+        if (effective_target_duration is None or effective_target_duration <= 0):
+            cot_duration = metadata.get("duration")
+            if cot_duration is not None:
+                try:
+                    cot_duration_f = float(cot_duration)
+                    if cot_duration_f > 0:
+                        effective_target_duration = cot_duration_f
+                        logger.info(
+                            f"Phase 2: using CoT-extracted duration={cot_duration_f}s "
+                            f"(user target_duration was {target_duration!r})"
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+
         # Format metadata as CoT using YAML (matching training format)
         cot_text = self._format_metadata_as_cot(metadata)
 
@@ -1516,7 +1539,7 @@ class LLMHandler:
                         repetition_penalty=repetition_penalty,
                         use_constrained_decoding=use_constrained_decoding,
                         constrained_decoding_debug=constrained_decoding_debug,
-                        target_duration=target_duration,
+                        target_duration=effective_target_duration,
                         generation_phase="codes",
                         caption=caption,
                         lyrics=lyrics,
@@ -1534,7 +1557,7 @@ class LLMHandler:
                         repetition_penalty=repetition_penalty,
                         use_constrained_decoding=use_constrained_decoding,
                         constrained_decoding_debug=constrained_decoding_debug,
-                        target_duration=target_duration,
+                        target_duration=effective_target_duration,
                         generation_phase="codes",
                         caption=caption,
                         lyrics=lyrics,
@@ -1552,7 +1575,7 @@ class LLMHandler:
                         repetition_penalty=repetition_penalty,
                         use_constrained_decoding=use_constrained_decoding,
                         constrained_decoding_debug=constrained_decoding_debug,
-                        target_duration=target_duration,
+                        target_duration=effective_target_duration,
                         generation_phase="codes",
                         caption=caption,
                         lyrics=lyrics,
@@ -1617,7 +1640,7 @@ class LLMHandler:
                     "top_k": top_k,
                     "top_p": top_p,
                     "repetition_penalty": repetition_penalty,
-                    "target_duration": target_duration,
+                    "target_duration": effective_target_duration,
                     "user_metadata": None,  # No user metadata injection in Phase 2
                     "skip_caption": True,  # Skip caption since CoT is already included
                     "skip_language": True,  # Skip language since CoT is already included
