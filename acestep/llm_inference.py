@@ -886,6 +886,7 @@ class LLMHandler:
             self._code_bias_tensor = bias_tensor
             self._code_bias_strength = strength
             self._code_bias_path = path
+            self._code_bias_log_count = 0  # Reset diagnostic log counter
 
             n_tokens = metadata.get('unique_tokens', len(bias_dict))
             msg = (f"✅ Code bias loaded: {n_tokens} tokens, "
@@ -913,6 +914,8 @@ class LLMHandler:
         logger.info(f"[LLM] {msg}")
         return msg
 
+    _code_bias_log_count = 0
+
     def _apply_code_bias(self, logits: torch.Tensor) -> torch.Tensor:
         """Add the code bias to logits if loaded and strength > 0."""
         if self._code_bias_tensor is None or self._code_bias_strength == 0:
@@ -923,7 +926,16 @@ class LLMHandler:
             self._code_bias_tensor = bias
         # Clamp to avoid OOB if vocab sizes differ
         v = min(logits.shape[-1], bias.shape[-1])
-        logits[..., :v] = logits[..., :v] + bias[..., :v] * self._code_bias_strength
+        # Diagnostic: log the first few applications
+        if self._code_bias_log_count < 3:
+            pre_top5 = torch.topk(logits[0, :v].float(), 5)
+            logits[..., :v] = logits[..., :v] + bias[..., :v] * self._code_bias_strength
+            post_top5 = torch.topk(logits[0, :v].float(), 5)
+            logger.info(f"[CODE BIAS] Applied! strength={self._code_bias_strength:.2f}, "
+                       f"pre_top={pre_top5.values.tolist()[:3]}, post_top={post_top5.values.tolist()[:3]}")
+            self._code_bias_log_count += 1
+        else:
+            logits[..., :v] = logits[..., :v] + bias[..., :v] * self._code_bias_strength
         return logits
 
     def _initialize_5hz_lm_vllm(self, model_path: str, enforce_eager: bool = False) -> str:
@@ -1304,6 +1316,19 @@ class LLMHandler:
                                f"ids={top5_ids.tolist()}, vals={[f'{v:.4f}' for v in top5_vals.tolist()]}, "
                                f"tokens={top5_tokens}")
                     del probe_out, probe_logits
+                # Build a LogitsProcessor wrapper for the code bias
+                from transformers import LogitsProcessor as _LogitsProcessor
+                class _CodeBiasProcessor(_LogitsProcessor):
+                    def __init__(self, handler):
+                        self._handler = handler
+                    def __call__(self, input_ids, scores):
+                        return self._handler._apply_code_bias(scores)
+                bias_lp = logits_processor if len(logits_processor) > 0 else []
+                if self._code_bias_tensor is not None and self._code_bias_strength > 0:
+                    from transformers import LogitsProcessorList
+                    bias_lp = LogitsProcessorList(list(bias_lp) + [_CodeBiasProcessor(self)])
+                    logger.info(f"[CODE BIAS] Injecting into native generate() path")
+
                 with torch.inference_mode():
                     outputs = self.llm.generate(
                         **inputs,
@@ -1312,7 +1337,7 @@ class LLMHandler:
                         do_sample=True if temperature > 0 else False,
                         top_k=top_k if top_k is not None and top_k > 0 else None,
                         top_p=top_p if top_p is not None and 0.0 < top_p < 1.0 else None,
-                        logits_processor=logits_processor if len(logits_processor) > 0 else None,
+                        logits_processor=bias_lp if len(bias_lp) > 0 else None,
                         pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
                         streamer=None,
                     )
