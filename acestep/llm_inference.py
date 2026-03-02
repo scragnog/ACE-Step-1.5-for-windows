@@ -1092,26 +1092,31 @@ class LLMHandler:
                 # ── Manual LoRA forward test on first q_proj ──
                 try:
                     layer0_qproj = self.llm.base_model.model.model.layers[0].self_attn.q_proj
-                    test_input = torch.randn(1, 1, layer0_qproj.base_layer.in_features,
-                                           device=self.device, dtype=self.dtype)
-                    # Base output only
-                    base_out = layer0_qproj.base_layer(test_input)
-                    # LoRA output manually
+                    # CHECK: active_adapters (PLURAL) — this is what PEFT's forward() iterates
+                    active_adapters_list = getattr(layer0_qproj, 'active_adapters', 'NOT FOUND')
+                    logger.info(f"[LM DIAG] layer0.q_proj.active_adapters = {active_adapters_list}")
+                    logger.info(f"[LM DIAG] layer0.q_proj.r = {getattr(layer0_qproj, 'r', 'NOT FOUND')}")
+                    logger.info(f"[LM DIAG] layer0.q_proj._disable_adapters = {getattr(layer0_qproj, '_disable_adapters', 'NOT FOUND')}")
+                    logger.info(f"[LM DIAG] layer0.q_proj.disable_adapters = {getattr(layer0_qproj, 'disable_adapters', 'NOT FOUND')}")
+                    # Cast test input to LoRA weight dtype
                     lora_a = layer0_qproj.lora_A['default']
                     lora_b = layer0_qproj.lora_B['default']
                     scaling = layer0_qproj.scaling['default']
+                    lora_dtype = lora_a.weight.dtype
+                    test_input = torch.randn(1, 1, layer0_qproj.base_layer.in_features,
+                                           device=self.device, dtype=lora_dtype)
+                    base_out = layer0_qproj.base_layer(test_input.to(self.dtype))
                     lora_out = lora_b(lora_a(test_input)) * scaling
-                    # Full PEFT forward
-                    full_out = layer0_qproj(test_input)
-                    diff_manual = (base_out + lora_out - base_out).norm().item()
-                    diff_peft = (full_out - base_out).norm().item()
-                    logger.info(f"[LM DIAG] MANUAL LoRA test on layer0.q_proj: "
-                               f"base_norm={base_out.norm().item():.4f}, "
-                               f"lora_manual_norm={lora_out.norm().item():.4f}, "
-                               f"peft_diff_from_base={diff_peft:.4f}, "
-                               f"scaling={scaling}")
+                    full_out = layer0_qproj(test_input.to(self.dtype))
+                    diff_peft = (full_out.float() - base_out.float()).norm().item()
+                    logger.info(f"[LM DIAG] MANUAL LoRA test: "
+                               f"base={base_out.norm().item():.4f}, "
+                               f"lora_manual={lora_out.norm().item():.4f}, "
+                               f"peft_diff={diff_peft:.4f}, "
+                               f"lora_dtype={lora_dtype}, base_dtype={self.dtype}")
                 except Exception as e:
-                    logger.warning(f"[LM DIAG] Manual LoRA test failed: {e}")
+                    import traceback
+                    logger.warning(f"[LM DIAG] Manual LoRA test failed: {e}\n{traceback.format_exc()}")
             else:
                 logger.info("[LM DIAG] PEFT NOT active — running base model (no LoRA)")
         except ImportError:
