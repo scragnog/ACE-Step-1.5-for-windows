@@ -766,8 +766,11 @@ class LLMHandler:
 
         try:
             from peft import PeftModel
-            # Unwrap existing adapter first if already loaded
-            if hasattr(self.llm, "base_model"):
+            # Unwrap existing PEFT adapter first if one is already loaded.
+            # NOTE: all HuggingFace PreTrainedModel subclasses expose a `base_model`
+            # property (it returns `self`), so hasattr() is always True and cannot be
+            # used to detect PEFT wrapping.  isinstance() is the correct check.
+            if isinstance(self.llm, PeftModel):
                 base = self.llm.base_model.model
             else:
                 base = self.llm
