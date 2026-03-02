@@ -1043,11 +1043,34 @@ class LLMHandler:
             is_peft = isinstance(self.llm, PeftModel)
             if is_peft:
                 active_adapter = self.llm.active_adapter if hasattr(self.llm, 'active_adapter') else 'unknown'
-                # Count LoRA layers
                 lora_count = sum(1 for n, _ in self.llm.named_modules() if 'lora' in n.lower())
+                # Check actual PEFT scaling values (what matters for forward pass)
+                scaling_vals = []
+                lora_a_norms = []
+                lora_b_norms = []
+                for name, module in self.llm.named_modules():
+                    if hasattr(module, 'scaling') and isinstance(module.scaling, dict):
+                        for adapter_name, s in module.scaling.items():
+                            scaling_vals.append(s)
+                    if hasattr(module, 'lora_A') and isinstance(module.lora_A, torch.nn.ModuleDict):
+                        for adapter_name, linear in module.lora_A.items():
+                            norm = linear.weight.data.norm().item()
+                            lora_a_norms.append(norm)
+                    if hasattr(module, 'lora_B') and isinstance(module.lora_B, torch.nn.ModuleDict):
+                        for adapter_name, linear in module.lora_B.items():
+                            norm = linear.weight.data.norm().item()
+                            lora_b_norms.append(norm)
+                unique_scales = list(set(f"{s:.4f}" for s in scaling_vals[:10]))
+                avg_a = sum(lora_a_norms) / len(lora_a_norms) if lora_a_norms else 0
+                avg_b = sum(lora_b_norms) / len(lora_b_norms) if lora_b_norms else 0
+                max_a = max(lora_a_norms) if lora_a_norms else 0
+                max_b = max(lora_b_norms) if lora_b_norms else 0
                 logger.info(f"[LM DIAG] PEFT active: adapter='{active_adapter}', "
-                           f"lora_modules={lora_count}, scale={getattr(self, '_lm_lora_scale', 'N/A')}, "
-                           f"path={getattr(self, 'lm_lora_path', 'N/A')}")
+                           f"lora_modules={lora_count}, "
+                           f"self._lm_lora_scale={getattr(self, '_lm_lora_scale', 'N/A')}")
+                logger.info(f"[LM DIAG] PEFT actual scaling values (sample): {unique_scales}")
+                logger.info(f"[LM DIAG] LoRA_A weight norms: count={len(lora_a_norms)}, avg={avg_a:.6f}, max={max_a:.6f}")
+                logger.info(f"[LM DIAG] LoRA_B weight norms: count={len(lora_b_norms)}, avg={avg_b:.6f}, max={max_b:.6f}")
             else:
                 logger.info("[LM DIAG] PEFT NOT active — running base model (no LoRA)")
         except ImportError:
