@@ -1037,6 +1037,22 @@ class LLMHandler:
         cot_text: str,
     ) -> str:
         """Internal helper function for single-item PyTorch generation."""
+        # ── PEFT LoRA diagnostic ──
+        try:
+            from peft import PeftModel
+            is_peft = isinstance(self.llm, PeftModel)
+            if is_peft:
+                active_adapter = self.llm.active_adapter if hasattr(self.llm, 'active_adapter') else 'unknown'
+                # Count LoRA layers
+                lora_count = sum(1 for n, _ in self.llm.named_modules() if 'lora' in n.lower())
+                logger.info(f"[LM DIAG] PEFT active: adapter='{active_adapter}', "
+                           f"lora_modules={lora_count}, scale={getattr(self, '_lm_lora_scale', 'N/A')}, "
+                           f"path={getattr(self, 'lm_lora_path', 'N/A')}")
+            else:
+                logger.info("[LM DIAG] PEFT NOT active — running base model (no LoRA)")
+        except ImportError:
+            logger.info("[LM DIAG] PEFT not installed")
+
         inputs = self.llm_tokenizer(
             formatted_prompt,
             return_tensors="pt",
