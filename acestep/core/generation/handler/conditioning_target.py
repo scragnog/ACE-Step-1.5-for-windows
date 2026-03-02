@@ -82,6 +82,22 @@ class ConditioningTargetMixin:
 
             max_latent_length = max(latent.shape[0] for latent in target_latents_list)
             max_latent_length = max(128, max_latent_length)
+
+            # Safety: clamp to silence_latent's pre-allocated capacity.
+            # If CoT generates a duration longer than silence_latent (e.g. 384s CoT vs
+            # 300s silence_latent), silence_latent_tiled would silently truncate while
+            # chunk_masks would keep the full length → RuntimeError in prepare_condition.
+            silence_latent_capacity = self.silence_latent.shape[1]
+            if max_latent_length > silence_latent_capacity:
+                from loguru import logger as _log
+                _log.warning(
+                    f"[conditioning_target] max_latent_length={max_latent_length} exceeds "
+                    f"silence_latent capacity={silence_latent_capacity}. "
+                    f"Clamping to avoid tensor shape mismatch. "
+                    f"(CoT may have requested a duration longer than the model supports.)"
+                )
+                max_latent_length = silence_latent_capacity
+
             silence_latent_tiled = self.silence_latent[0, :max_latent_length, :]
 
             padded_latents = []
