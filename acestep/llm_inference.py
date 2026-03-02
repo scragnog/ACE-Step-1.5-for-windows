@@ -1088,7 +1088,30 @@ class LLMHandler:
                         disable_flags.append(module.disable_adapters)
                 logger.info(f"[LM DIAG] Adapter names in layers: {adapter_names_in_layers}")
                 logger.info(f"[LM DIAG] Merged adapters (first 5): {merged_info[:5]}")
-                logger.info(f"[LM DIAG] disable_adapters flags (unique): {set(disable_flags)}")
+                logger.info(f"[LM DIAG] disable_adapters flags (unique): {set(type(f).__name__ if callable(f) else f for f in disable_flags)}")
+                # ── Manual LoRA forward test on first q_proj ──
+                try:
+                    layer0_qproj = self.llm.base_model.model.model.layers[0].self_attn.q_proj
+                    test_input = torch.randn(1, 1, layer0_qproj.base_layer.in_features,
+                                           device=self.device, dtype=self.dtype)
+                    # Base output only
+                    base_out = layer0_qproj.base_layer(test_input)
+                    # LoRA output manually
+                    lora_a = layer0_qproj.lora_A['default']
+                    lora_b = layer0_qproj.lora_B['default']
+                    scaling = layer0_qproj.scaling['default']
+                    lora_out = lora_b(lora_a(test_input)) * scaling
+                    # Full PEFT forward
+                    full_out = layer0_qproj(test_input)
+                    diff_manual = (base_out + lora_out - base_out).norm().item()
+                    diff_peft = (full_out - base_out).norm().item()
+                    logger.info(f"[LM DIAG] MANUAL LoRA test on layer0.q_proj: "
+                               f"base_norm={base_out.norm().item():.4f}, "
+                               f"lora_manual_norm={lora_out.norm().item():.4f}, "
+                               f"peft_diff_from_base={diff_peft:.4f}, "
+                               f"scaling={scaling}")
+                except Exception as e:
+                    logger.warning(f"[LM DIAG] Manual LoRA test failed: {e}")
             else:
                 logger.info("[LM DIAG] PEFT NOT active — running base model (no LoRA)")
         except ImportError:
