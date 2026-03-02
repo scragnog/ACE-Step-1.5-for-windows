@@ -97,18 +97,17 @@ class TaskUtilsMixin:
         return TASK_INSTRUCTIONS["text2music"]
 
     def determine_task_type(self, task_type, audio_code_string):
-        """Compute task-mode booleans for downstream generation logic."""
+        """Compute task-mode booleans for downstream generation logic.
+
+        NOTE: We do NOT force is_cover_task when audio codes are present.
+        For text2music, audio codes are LM token hints (used to skip the LM
+        during upscale), not a signal that this is a cover task.
+        The conditioning_target pipeline already handles codes unconditionally.
+        """
         is_repaint_task = task_type == "repaint"
         is_lego_task = task_type == "lego"
         is_cover_task = task_type == "cover"
 
-        if isinstance(audio_code_string, list):
-            has_codes = any((c or "").strip() for c in audio_code_string)
-        else:
-            has_codes = bool(audio_code_string and str(audio_code_string).strip())
-
-        if has_codes:
-            is_cover_task = True
         can_use_repainting = is_repaint_task or is_lego_task
         return is_repaint_task, is_lego_task, is_cover_task, can_use_repainting
 
