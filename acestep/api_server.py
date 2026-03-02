@@ -405,6 +405,7 @@ PARAM_ALIASES = {
     "lm_repetition_penalty": ["lm_repetition_penalty", "lmRepetitionPenalty"],
     "get_scores": ["get_scores", "getScores"],
     "score_scale": ["score_scale", "scoreScale"],
+    "audio_code_string": ["audio_code_string", "audioCodeString", "audioCodes", "audio_codes"],
 }
 
 
@@ -588,6 +589,7 @@ class GenerateMusicRequest(BaseModel):
     tempo_scale: float = 1.0
     pitch_shift: int = 0
     task_type: str = "text2music"
+    audio_code_string: str = Field(default="", description="Pre-generated audio codes for upscale (skip LM thinking)")
     analysis_only: bool = False
     full_analysis_only: bool = False
 
@@ -2252,7 +2254,7 @@ def create_app() -> FastAPI:
                     instruction=instruction_to_use,
                     reference_audio=req.reference_audio_path,
                     src_audio=req.src_audio_path,
-                    audio_codes="",
+                    audio_codes=req.audio_code_string or "",
                     caption=caption,
                     lyrics=lyrics,
                     instrumental=_is_instrumental(lyrics),
@@ -2614,6 +2616,13 @@ def create_app() -> FastAPI:
                     "dit_model": dit_model_name,
                     "lrc": [audio.get("lrc_text", "") for audio in result.audios] if req.get_lrc else None,
                     "scores": result.extra_outputs.get("scores") if req.get_scores else None,
+                    # Include LM-generated audio codes for preview→HQ upscale
+                    "audio_codes": next(
+                        (audio.get("params", {}).get("audio_codes", "")
+                         for audio in result.audios
+                         if audio.get("params", {}).get("audio_codes")),
+                        ""
+                    ),
                 }
 
             t0 = time.time()
