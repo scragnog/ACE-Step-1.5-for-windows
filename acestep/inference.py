@@ -182,6 +182,9 @@ class GenerationParams:
     steering_loaded: List[str] = field(default_factory=list)
     steering_alphas: Dict[str, float] = field(default_factory=dict)
 
+    # Preview → HQ Upscale
+    lm_hints_path: Optional[str] = None  # Path to pre-saved LM thinking tensor (.pt) for upscale
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for JSON serialization."""
         return asdict(self)
@@ -748,12 +751,26 @@ def generate_music(
                     logger.error(f"[generate_music] Failed to save audio file: {e}")
                     audio_path = ""  # Fallback to empty path
 
+            # Save LM hints tensor alongside audio (for preview → HQ upscale)
+            lm_hints_path_for_audio = None
+            lm_hints_tensor = dit_extra_outputs.get("precomputed_lm_hints_25Hz")
+            if lm_hints_tensor is not None and audio_path and save_dir is not None:
+                try:
+                    lm_hints_file = os.path.splitext(audio_path)[0] + "_lm_hints.pt"
+                    torch.save(lm_hints_tensor.cpu(), lm_hints_file)
+                    lm_hints_path_for_audio = lm_hints_file
+                    logger.info(f"[generate_music] LM hints saved: {lm_hints_file} "
+                                f"(shape={lm_hints_tensor.shape})")
+                except Exception as e:
+                    logger.warning(f"[generate_music] Failed to save LM hints: {e}")
+
             audio_dict = {
                 "path": audio_path or "",  # File path (saved here, not in handler)
                 "tensor": audio_tensor,  # Audio tensor [channels, samples], CPU, float32
                 "key": audio_key,
                 "sample_rate": sample_rate,
                 "params": audio_params,
+                "lm_hints_path": lm_hints_path_for_audio,  # Path to saved LM thinking tensor
             }
 
             audios.append(audio_dict)

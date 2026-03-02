@@ -33,4 +33,8 @@ class ServiceGenerateOutputsMixin:
         outputs["encoder_attention_mask"] = encoder_attention_mask
         outputs["context_latents"] = context_latents
         outputs["lyric_token_idss"] = payload["lyric_token_idss"]
+        # Surface LM thinking hints for downstream saving (preview → HQ upscale)
+        lm_hints = payload.get("precomputed_lm_hints_25Hz")
+        if lm_hints is not None:
+            outputs["precomputed_lm_hints_25Hz"] = lm_hints
         return outputs
