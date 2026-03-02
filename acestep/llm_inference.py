@@ -2936,6 +2936,12 @@ class LLMHandler:
                 # Apply temperature and sample
                 next_tokens = self._sample_tokens(cfg_logits, temperature)
 
+                # Diagnostic: log actual sampled token at first 3 steps
+                if step < 3:
+                    sampled_id = next_tokens[0].item()
+                    sampled_tok = self.llm_tokenizer.decode([sampled_id])
+                    logger.info(f"[LM DIAG] step={step} SAMPLED token: id={sampled_id}, token={sampled_tok}")
+
                 # Update constrained processor state AFTER sampling
                 self._update_constrained_processor_state(constrained_processor, next_tokens)
 
