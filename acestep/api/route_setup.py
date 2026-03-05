@@ -10,12 +10,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from acestep.api.http.audio_route import register_audio_route
+from acestep.api.http.cancel_route import register_cancel_route
+from acestep.api.http.enhance_routes import register_enhance_routes
 from acestep.api.http.lora_routes import register_lora_routes
 from acestep.api.http.model_service_routes import register_model_service_routes
+from acestep.api.http.model_switch_routes import register_model_switch_routes
 from acestep.api.http.query_result_route import register_query_result_route
 from acestep.api.http.reinitialize_route import register_reinitialize_route
 from acestep.api.http.release_task_route import register_release_task_route
 from acestep.api.http.sample_format_routes import register_sample_format_routes
+from acestep.api.http.stats_route import register_stats_route
+from acestep.api.http.steering_routes import register_steering_routes
+from acestep.api.http.stems_routes import register_stems_routes
+from acestep.api.http.system_routes import register_system_routes
 from acestep.api.train_api_service import register_training_api_routes
 from acestep.openrouter_adapter import create_openrouter_router
 
@@ -68,6 +75,8 @@ def configure_api_routes(
     openrouter_router = create_openrouter_router(lambda: app.state)
     app.include_router(openrouter_router)
 
+    # ── Upstream route modules ─────────────────────────────────────
+
     register_model_service_routes(
         app=app,
         verify_api_key=verify_api_key,
@@ -96,7 +105,12 @@ def configure_api_routes(
         to_float=to_float,
     )
 
-    register_lora_routes(app=app, verify_api_key=verify_api_key, wrap_response=wrap_response)
+    register_lora_routes(
+        app=app,
+        verify_api_key=verify_api_key,
+        wrap_response=wrap_response,
+        get_project_root=get_project_root,
+    )
 
     register_reinitialize_route(
         app=app,
@@ -147,3 +161,51 @@ def configure_api_routes(
         task_timeout_seconds=task_timeout_seconds,
         log_buffer=log_buffer,
     )
+
+    # ── Custom route modules (our additions) ───────────────────────
+
+    register_cancel_route(
+        app=app,
+        verify_token_from_request=verify_token_from_request,
+        wrap_response=wrap_response,
+        store=store,
+    )
+
+    register_stats_route(
+        app=app,
+        verify_api_key=verify_api_key,
+        wrap_response=wrap_response,
+        store=store,
+        queue_maxsize=queue_maxsize,
+        initial_avg_job_seconds=initial_avg_job_seconds,
+    )
+
+    register_model_switch_routes(
+        app=app,
+        verify_api_key=verify_api_key,
+        wrap_response=wrap_response,
+        get_model_name=get_model_name,
+    )
+
+    register_steering_routes(
+        app=app,
+        verify_api_key=verify_api_key,
+        verify_token_from_request=verify_token_from_request,
+        wrap_response=wrap_response,
+    )
+
+    register_system_routes(
+        app=app,
+        log_buffer=log_buffer,
+    )
+
+    register_stems_routes(
+        app=app,
+        get_project_root=get_project_root,
+    )
+
+    register_enhance_routes(
+        app=app,
+        get_project_root=get_project_root,
+    )
+

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -56,6 +56,14 @@ class GenerateMusicRequest(BaseModel):
         default=0.0,
         description="Cover noise blending strength (0.0=pure noise, 1.0=closest to source audio). Used for cover/repaint tasks.",
     )
+    # ── Custom fields (not in sdbds upstream) ──────────────────────
+    tempo_scale: float = Field(default=1.0, description="Tempo scaling factor (0.5-2.0)")
+    pitch_shift: int = Field(default=0, description="Pitch shift in semitones (-12 to +12)")
+    enable_normalization: bool = Field(default=True, description="Enable loudness normalization")
+    normalization_db: float = Field(default=-1.0, description="Target normalization loudness in dB")
+    latent_shift: float = Field(default=0.0, description="Latent space shift factor")
+    latent_rescale: float = Field(default=1.0, description="Latent space rescale factor")
+
     audio_code_string: str = Field(
         default="",
         description="User-provided audio semantic codes string for code-control generation. When non-empty, skips LM code generation.",
@@ -65,9 +73,17 @@ class GenerateMusicRequest(BaseModel):
     full_analysis_only: bool = False
 
     use_adg: bool = False
+    guidance_mode: str = Field(default="", description="Guidance mode override (e.g. 'cfg', 'pag')")
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
     infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
+
+    # ── PAG (Perturbed Attention Guidance) ─────────────────────────
+    use_pag: bool = Field(default=False, description="Enable Perturbed Attention Guidance")
+    pag_start: float = Field(default=0.30, description="PAG timestep start (0.0-1.0)")
+    pag_end: float = Field(default=0.80, description="PAG timestep end (0.0-1.0)")
+    pag_scale: float = Field(default=0.2, description="PAG guidance scale")
+
     shift: float = Field(
         default=3.0,
         description="Timestep shift factor (range 1.0~5.0, default 3.0). Only effective for base models, not turbo models.",
@@ -103,8 +119,19 @@ class GenerateMusicRequest(BaseModel):
     lm_repetition_penalty: float = 1.0
     lm_negative_prompt: str = "NO USER INPUT"
 
+    # ── Scoring & LRC output ──────────────────────────────────────
+    get_lrc: bool = Field(default=False, description="Return LRC (timed lyrics) in response")
+    get_scores: bool = Field(default=False, description="Compute quality scores for generated audio")
+    score_scale: float = Field(default=0.1, description="Score computation scale factor")
+
+    # ── Activation steering ───────────────────────────────────────
+    steering_enabled: bool = Field(default=False, description="Enable TADA activation steering during generation")
+    steering_loaded: List[str] = Field(default_factory=list, description="List of loaded steering concept names")
+    steering_alphas: Dict[str, float] = Field(default_factory=dict, description="Per-concept alpha values")
+
     class Config:
         """Legacy pydantic config preserving prior population semantics."""
 
         allow_population_by_field_name = True
         allow_population_by_alias = True
+
