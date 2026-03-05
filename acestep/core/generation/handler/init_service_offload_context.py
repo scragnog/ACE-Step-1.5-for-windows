@@ -13,6 +13,22 @@ class InitServiceOffloadContextMixin:
     def _load_model_context(self, model_name: str):
         """Load a model to device for the context and offload back to CPU on exit."""
         if not self.offload_to_cpu:
+            # Defensive: verify the model is actually on self.device.
+            # Training routes offload components to CPU and restore() may
+            # fail silently, leaving a model stranded on CPU.
+            model = getattr(self, model_name, None)
+            if model is not None:
+                try:
+                    param = next(model.parameters())
+                    target_type = str(self.device).split(":")[0]
+                    if param.device.type != target_type:
+                        logger.warning(
+                            f"[_load_model_context] {model_name} found on {param.device} "
+                            f"but expected {self.device} (offload_to_cpu=False). Recovering."
+                        )
+                        self._recursive_to_device(model, self.device, self.dtype)
+                except StopIteration:
+                    pass
             yield
             return
 
@@ -44,7 +60,8 @@ class InitServiceOffloadContextMixin:
         else:
             self._recursive_to_device(model, self.device, self.dtype)
 
-        if model_name == "model" and hasattr(self, "silence_latent"):
+        # Sync silence_latent when loading VAE or model (both may use it)
+        if model_name in ("vae", "model") and hasattr(self, "silence_latent"):
             self.silence_latent = self.silence_latent.to(self.device).to(self.dtype)
 
         load_time = time.time() - start_time

@@ -35,14 +35,22 @@ except ImportError:
     HAS_BNB = False
     logger.warning("bitsandbytes not installed. Using standard AdamW.")
 
+try:
+    import flashoptim  # noqa: F401
+    HAS_FO = True
+except ImportError:
+    HAS_FO = False
+
 from acestep.training.configs import LoRAConfig, LoKRConfig, TrainingConfig
+from acestep.training.lora_injection import inject_lora_into_dit
 from acestep.training.lora_utils import (
-    inject_lora_into_dit,
+    check_peft_available,
     load_lora_training_weights,
+)
+from acestep.training.lora_checkpoint import (
     save_lora_weights,
     save_training_checkpoint,
     load_training_checkpoint,
-    check_peft_available,
 )
 from acestep.training.lokr_utils import (
     inject_lokr_into_dit,
@@ -108,20 +116,6 @@ def _select_fabric_precision(device_type: str) -> str:
     return "32-true"
 
 
-def _ensure_trainable_params_fp32(module: nn.Module) -> Tuple[int, int]:
-    """Force trainable floating-point parameters to fp32."""
-    casted = 0
-    total = 0
-    for p in module.parameters():
-        if not p.requires_grad:
-            continue
-        total += 1
-        if p.is_floating_point() and p.dtype != torch.float32:
-            with torch.no_grad():
-                p.data = p.data.float()
-            casted += 1
-    return casted, total
-
 
 def _count_nonfinite_grads(params: List[torch.nn.Parameter]) -> Tuple[int, int]:
     """Count non-finite gradient tensors among params with gradients."""
@@ -156,21 +150,6 @@ def _accumulate_loss_without_sync(
         return accumulated_loss
     return loss_detached
 
-
-def _ensure_optimizer_params_fp32(optimizer: torch.optim.Optimizer) -> Tuple[int, int]:
-    """Force optimizer parameter tensors to fp32 when trainable."""
-    casted = 0
-    total = 0
-    for group in optimizer.param_groups:
-        for p in group.get("params", []):
-            if p is None:
-                continue
-            total += 1
-            if p.is_floating_point() and p.dtype != torch.float32:
-                with torch.no_grad():
-                    p.data = p.data.float()
-                casted += 1
-    return casted, total
 
 
 def _build_param_name_lookup(module: nn.Module, extra_module: Optional[nn.Module] = None) -> Dict[int, str]:
@@ -814,17 +793,18 @@ class LoRATrainer:
                 else:
                     yield 0, 0.0, "⚠️ FP8 requested but unavailable, using bf16"
 
-        # Keep frozen weights in compute dtype (bf16/fp16) for memory efficiency.
-        # Only trainable (LoRA) parameters are promoted to fp32 for optimizer stability.
-        # MPS uses fp32 weights throughout for numerical stability.
+        # Keep all weights in compute dtype — uniform dtype avoids wasteful
+        # fp32 upcasts that double LoRA param memory and can cause OOM.
+        # Fabric bf16-mixed autocast handles precision during forward/backward.
+        # MPS uses fp32 throughout for numerical stability.
         if device_type == "mps":
             self.module.model.decoder = self.module.model.decoder.to(dtype=torch.float32)
+        elif HAS_FO:
+            from flashoptim import cast_model
+            cast_model(self.module.model.decoder, dtype=torch.bfloat16)
+            logger.info("FlashOptim: cast decoder to bf16 (norm layers kept fp32)")
         else:
             self.module.model.decoder = self.module.model.decoder.to(dtype=self.module.dtype)
-        casted_trainable, total_trainable_tensors = _ensure_trainable_params_fp32(self.module.model.decoder)
-        logger.info(
-            f"Trainable tensor dtype fixup: casted {casted_trainable}/{total_trainable_tensors} to fp32"
-        )
 
         # Get dataloader
         train_loader = data_module.train_dataloader()
@@ -855,8 +835,13 @@ class LoRATrainer:
             "lr": self.training_config.learning_rate,
             "weight_decay": self.training_config.weight_decay,
         }
-        # Optimizer selection: AdamW 8-bit vs Standard AdamW
-        if HAS_BNB and device_type == "cuda":
+        # Optimizer selection: FlashOptim vs AdamW 8-bit vs Standard AdamW
+        grad_release_handle = None
+        if HAS_FO:
+            from flashoptim import FlashAdamW
+            logger.info("train_with_fabric using FlashAdamW optimizer")
+            optimizer = FlashAdamW(trainable_params, **optimizer_kwargs)
+        elif HAS_BNB and device_type == "cuda":
             logger.info("train_with_fabric using bitsandbytes 8-bit AdamW optimizer")
             optimizer = bnb.optim.AdamW8bit(trainable_params, **optimizer_kwargs)
         else:
@@ -891,10 +876,21 @@ class LoRATrainer:
 
         # Setup with Fabric - only the decoder (which has LoRA)
         self.module.model.decoder, optimizer = self.fabric.setup(self.module.model.decoder, optimizer)
-        casted_opt_params, total_opt_params = _ensure_optimizer_params_fp32(optimizer)
-        logger.info(
-            f"Optimizer param dtype fixup: casted {casted_opt_params}/{total_opt_params} to fp32"
-        )
+
+        # FlashOptim gradient release: updates parameters during backward,
+        # eliminating gradient storage.  Only compatible with accumulation_steps=1,
+        # no gradient clipping, and no GradScaler (bf16-mixed is fine).
+        if HAS_FO and self.training_config.gradient_accumulation_steps <= 1:
+            from flashoptim import enable_gradient_release
+            grad_release_handle = enable_gradient_release(
+                self.module.model.decoder, optimizer
+            )
+            logger.info("FlashOptim gradient release enabled (accumulation_steps=1)")
+        elif HAS_FO:
+            logger.info(
+                f"FlashOptim gradient release disabled "
+                f"(accumulation_steps={self.training_config.gradient_accumulation_steps} > 1)"
+            )
         try:
             train_loader = self.fabric.setup_dataloaders(train_loader, move_to_device=False)
         except TypeError:
@@ -1003,23 +999,28 @@ class LoRATrainer:
 
                 # Optimizer step
                 if accumulation_step >= self.training_config.gradient_accumulation_steps:
-                    nonfinite_grads, grad_tensors = _count_nonfinite_grads(trainable_params)
-                    if nonfinite_grads > 0:
-                        optimizer.zero_grad(set_to_none=True)
-                        yield global_step, float("nan"), (
-                            f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
-                            "skipping optimizer step"
-                        )
-                        accumulated_loss = 0.0
-                        accumulation_step = 0
-                        continue
+                    # Gradient release: gradients are freed during backward and
+                    # optimizer step already happened, so skip non-finite checks
+                    # and clipping (both incompatible).  step()/zero_grad() are
+                    # harmless no-ops under gradient release.
+                    if grad_release_handle is None:
+                        nonfinite_grads, grad_tensors = _count_nonfinite_grads(trainable_params)
+                        if nonfinite_grads > 0:
+                            optimizer.zero_grad(set_to_none=True)
+                            yield global_step, float("nan"), (
+                                f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
+                                "skipping optimizer step"
+                            )
+                            accumulated_loss = 0.0
+                            accumulation_step = 0
+                            continue
 
-                    self.fabric.clip_gradients(
-                        self.module.model.decoder,
-                        optimizer,
-                        max_norm=self.training_config.max_grad_norm,
-                        error_if_nonfinite=False,
-                    )
+                        self.fabric.clip_gradients(
+                            self.module.model.decoder,
+                            optimizer,
+                            max_norm=self.training_config.max_grad_norm,
+                            error_if_nonfinite=False,
+                        )
 
                     optimizer.step()
                     scheduler.step()
@@ -1048,23 +1049,28 @@ class LoRATrainer:
             # Flush remainder to avoid dropping gradients when epoch length is not
             # divisible by gradient_accumulation_steps.
             if accumulation_step > 0:
-                nonfinite_grads, grad_tensors = _count_nonfinite_grads(trainable_params)
-                if nonfinite_grads > 0:
-                    optimizer.zero_grad(set_to_none=True)
-                    yield global_step, float("nan"), (
-                        f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
-                        "skipping optimizer remainder step"
-                    )
-                    accumulated_loss = 0.0
-                    accumulation_step = 0
-                else:
-                    self.fabric.clip_gradients(
-                        self.module.model.decoder,
-                        optimizer,
-                        max_norm=self.training_config.max_grad_norm,
-                        error_if_nonfinite=False,
-                    )
+                if grad_release_handle is None:
+                    nonfinite_grads, grad_tensors = _count_nonfinite_grads(trainable_params)
+                    if nonfinite_grads > 0:
+                        optimizer.zero_grad(set_to_none=True)
+                        yield global_step, float("nan"), (
+                            f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
+                            "skipping optimizer remainder step"
+                        )
+                        accumulated_loss = 0.0
+                        accumulation_step = 0
+                    else:
+                        self.fabric.clip_gradients(
+                            self.module.model.decoder,
+                            optimizer,
+                            max_norm=self.training_config.max_grad_norm,
+                            error_if_nonfinite=False,
+                        )
 
+                        optimizer.step()
+                        scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+                else:
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
@@ -1150,6 +1156,11 @@ class LoRATrainer:
                 )
                 yield global_step, avg_epoch_loss, f"💾 Checkpoint saved at epoch {epoch+1}"
 
+        # Clean up gradient release hooks before saving
+        if grad_release_handle is not None:
+            grad_release_handle.remove()
+            logger.info("FlashOptim gradient release handle removed")
+
         # Save final model
         final_path = os.path.join(self.training_config.output_dir, "final")
         save_lora_weights(self.module.model, final_path)
@@ -1175,19 +1186,19 @@ class LoRATrainer:
             yield 0, 0.0, "❌ No trainable parameters found!"
             return
 
-        if HAS_BNB and self.module.device_type == "cuda":
-            optimizer = bnb.optim.AdamW8bit(
-                trainable_params,
-                lr=self.training_config.learning_rate,
-                weight_decay=self.training_config.weight_decay,
-            )
+        optimizer_kwargs = {
+            "lr": self.training_config.learning_rate,
+            "weight_decay": self.training_config.weight_decay,
+        }
+        if HAS_FO:
+            from flashoptim import FlashAdamW
+            optimizer = FlashAdamW(trainable_params, **optimizer_kwargs)
+            logger.info("train_basic using FlashAdamW optimizer")
+        elif HAS_BNB and self.module.device_type == "cuda":
+            optimizer = bnb.optim.AdamW8bit(trainable_params, **optimizer_kwargs)
             logger.info("train_basic using bitsandbytes 8-bit AdamW optimizer")
         else:
-            optimizer = AdamW(
-                trainable_params,
-                lr=self.training_config.learning_rate,
-                weight_decay=self.training_config.weight_decay,
-            )
+            optimizer = AdamW(trainable_params, **optimizer_kwargs)
 
         steps_per_epoch = max(1, math.ceil(len(train_loader) / self.training_config.gradient_accumulation_steps))
         total_steps = steps_per_epoch * self.training_config.max_epochs
@@ -1593,9 +1604,15 @@ class LoKRTrainer:
             "lr": self.training_config.learning_rate,
             "weight_decay": self.training_config.weight_decay,
         }
-        if self.module.device.type == "cuda":
-            optimizer_kwargs["fused"] = True
-        optimizer = AdamW(trainable_params, **optimizer_kwargs)
+        grad_release_handle = None
+        if HAS_FO:
+            from flashoptim import FlashAdamW
+            logger.info("LoKr train_with_fabric using FlashAdamW optimizer")
+            optimizer = FlashAdamW(trainable_params, **optimizer_kwargs)
+        else:
+            if self.module.device.type == "cuda":
+                optimizer_kwargs["fused"] = True
+            optimizer = AdamW(trainable_params, **optimizer_kwargs)
 
         steps_per_epoch = max(1, math.ceil(len(train_loader) / self.training_config.gradient_accumulation_steps))
         total_steps = steps_per_epoch * self.training_config.max_epochs
@@ -1620,6 +1637,19 @@ class LoKRTrainer:
         )
 
         self.module.model.decoder, optimizer = self.fabric.setup(self.module.model.decoder, optimizer)
+
+        if HAS_FO and self.training_config.gradient_accumulation_steps <= 1:
+            from flashoptim import enable_gradient_release
+            grad_release_handle = enable_gradient_release(
+                self.module.model.decoder, optimizer
+            )
+            logger.info("FlashOptim gradient release enabled for LoKr (accumulation_steps=1)")
+        elif HAS_FO:
+            logger.info(
+                f"FlashOptim gradient release disabled for LoKr "
+                f"(accumulation_steps={self.training_config.gradient_accumulation_steps} > 1)"
+            )
+
         try:
             train_loader = self.fabric.setup_dataloaders(train_loader, move_to_device=False)
         except TypeError:
@@ -1665,33 +1695,36 @@ class LoKRTrainer:
                 accumulation_step += 1
 
                 if accumulation_step >= self.training_config.gradient_accumulation_steps:
-                    if manual_nonfinite_check:
-                        nonfinite_grads, grad_tensors, nonfinite_details = _count_nonfinite_grads_detailed(
-                            trainable_params,
-                            param_name_lookup,
-                            detail_limit=10,
-                        )
-                        if nonfinite_grads > 0:
-                            if nonfinite_details:
-                                logger.warning(
-                                    f"LoKr non-finite gradients ({nonfinite_grads}/{grad_tensors}) at epoch "
-                                    f"{epoch+1}, step {global_step}. Top offending tensors:\n"
-                                    + "\n".join(f"  - {d}" for d in nonfinite_details)
-                                )
-                            optimizer.zero_grad(set_to_none=True)
-                            yield global_step, float("nan"), (
-                                f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
-                                "skipping optimizer step (see logs for tensor names)"
+                    # Gradient release: skip non-finite checks and clipping
+                    # (gradients freed during backward, both incompatible).
+                    if grad_release_handle is None:
+                        if manual_nonfinite_check:
+                            nonfinite_grads, grad_tensors, nonfinite_details = _count_nonfinite_grads_detailed(
+                                trainable_params,
+                                param_name_lookup,
+                                detail_limit=10,
                             )
-                            accumulated_loss = 0.0
-                            accumulation_step = 0
-                            continue
-                    self.fabric.clip_gradients(
-                        self.module.model.decoder,
-                        optimizer,
-                        max_norm=self.training_config.max_grad_norm,
-                        error_if_nonfinite=False,
-                    )
+                            if nonfinite_grads > 0:
+                                if nonfinite_details:
+                                    logger.warning(
+                                        f"LoKr non-finite gradients ({nonfinite_grads}/{grad_tensors}) at epoch "
+                                        f"{epoch+1}, step {global_step}. Top offending tensors:\n"
+                                        + "\n".join(f"  - {d}" for d in nonfinite_details)
+                                    )
+                                optimizer.zero_grad(set_to_none=True)
+                                yield global_step, float("nan"), (
+                                    f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
+                                    "skipping optimizer step (see logs for tensor names)"
+                                )
+                                accumulated_loss = 0.0
+                                accumulation_step = 0
+                                continue
+                        self.fabric.clip_gradients(
+                            self.module.model.decoder,
+                            optimizer,
+                            max_norm=self.training_config.max_grad_norm,
+                            error_if_nonfinite=False,
+                        )
 
                     optimizer.step()
                     scheduler.step()
@@ -1721,34 +1754,35 @@ class LoKRTrainer:
                 epoch_compute_time += time.perf_counter() - step_started
 
             if accumulation_step > 0:
-                if manual_nonfinite_check:
-                    nonfinite_grads, grad_tensors, nonfinite_details = _count_nonfinite_grads_detailed(
-                        trainable_params,
-                        param_name_lookup,
-                        detail_limit=10,
-                    )
-                    if nonfinite_grads > 0:
-                        if nonfinite_details:
-                            logger.warning(
-                                f"LoKr non-finite remainder gradients ({nonfinite_grads}/{grad_tensors}) at epoch "
-                                f"{epoch+1}, step {global_step}. Top offending tensors:\n"
-                                + "\n".join(f"  - {d}" for d in nonfinite_details)
-                            )
-                        optimizer.zero_grad(set_to_none=True)
-                        yield global_step, float("nan"), (
-                            f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
-                            "skipping optimizer remainder step (see logs for tensor names)"
+                if grad_release_handle is None:
+                    if manual_nonfinite_check:
+                        nonfinite_grads, grad_tensors, nonfinite_details = _count_nonfinite_grads_detailed(
+                            trainable_params,
+                            param_name_lookup,
+                            detail_limit=10,
                         )
-                        accumulated_loss = 0.0
-                        accumulation_step = 0
-                        continue
+                        if nonfinite_grads > 0:
+                            if nonfinite_details:
+                                logger.warning(
+                                    f"LoKr non-finite remainder gradients ({nonfinite_grads}/{grad_tensors}) at epoch "
+                                    f"{epoch+1}, step {global_step}. Top offending tensors:\n"
+                                    + "\n".join(f"  - {d}" for d in nonfinite_details)
+                                )
+                            optimizer.zero_grad(set_to_none=True)
+                            yield global_step, float("nan"), (
+                                f"⚠️ Non-finite gradients ({nonfinite_grads}/{grad_tensors}); "
+                                "skipping optimizer remainder step (see logs for tensor names)"
+                            )
+                            accumulated_loss = 0.0
+                            accumulation_step = 0
+                            continue
 
-                self.fabric.clip_gradients(
-                    self.module.model.decoder,
-                    optimizer,
-                    max_norm=self.training_config.max_grad_norm,
-                    error_if_nonfinite=False,
-                )
+                    self.fabric.clip_gradients(
+                        self.module.model.decoder,
+                        optimizer,
+                        max_norm=self.training_config.max_grad_norm,
+                        error_if_nonfinite=False,
+                    )
 
                 optimizer.step()
                 scheduler.step()
@@ -1812,6 +1846,11 @@ class LoKRTrainer:
                 )
                 yield global_step, avg_epoch_loss, f"💾 Checkpoint saved at epoch {epoch+1}"
 
+        # Clean up gradient release hooks before saving
+        if grad_release_handle is not None:
+            grad_release_handle.remove()
+            logger.info("FlashOptim gradient release handle removed (LoKr)")
+
         final_path = os.path.join(self.training_config.output_dir, "final")
         final_metadata: Dict[str, Any] = {
             "lokr_config": self.lokr_config.to_dict() if self.lokr_config else None,
@@ -1846,11 +1885,16 @@ class LoKRTrainer:
             yield 0, 0.0, "❌ No trainable parameters found!"
             return
 
-        optimizer = AdamW(
-            trainable_params,
-            lr=self.training_config.learning_rate,
-            weight_decay=self.training_config.weight_decay,
-        )
+        optimizer_kwargs = {
+            "lr": self.training_config.learning_rate,
+            "weight_decay": self.training_config.weight_decay,
+        }
+        if HAS_FO:
+            from flashoptim import FlashAdamW
+            optimizer = FlashAdamW(trainable_params, **optimizer_kwargs)
+            logger.info("LoKr train_basic using FlashAdamW optimizer")
+        else:
+            optimizer = AdamW(trainable_params, **optimizer_kwargs)
         steps_per_epoch = max(1, math.ceil(len(train_loader) / self.training_config.gradient_accumulation_steps))
         total_steps = steps_per_epoch * self.training_config.max_epochs
         warmup_steps = min(self.training_config.warmup_steps, max(1, total_steps // 10))

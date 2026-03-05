@@ -442,10 +442,10 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
             
             with gr.Row():
                 save_every_n_epochs = gr.Slider(
-                    minimum=50,
+                    minimum=1,
                     maximum=1000,
-                    step=50,
-                    value=200,
+                    step=1,
+                    value=10,
                     label=t("training.save_every_n_epochs"),
                 )
                 
@@ -636,10 +636,10 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
 
             with gr.Row():
                 lokr_save_every_n_epochs = gr.Slider(
-                    minimum=50,
+                    minimum=1,
                     maximum=1000,
-                    step=50,
-                    value=50,
+                    step=1,
+                    value=10,
                     label="Save Every N Epochs",
                 )
 

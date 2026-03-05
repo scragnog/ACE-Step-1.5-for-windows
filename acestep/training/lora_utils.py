@@ -1,7 +1,7 @@
 """
 LoRA Utilities for ACE-Step
 
-Provides utilities for injecting LoRA adapters into the DiT decoder model.
+Provides utilities for inspecting and merging LoRA adapters.
 Uses PEFT (Parameter-Efficient Fine-Tuning) library for LoRA implementation.
 """
 
@@ -449,8 +449,7 @@ def merge_lora_weights(model) -> Any:
     Returns:
         Model with merged weights
     """
-    if hasattr(model, 'decoder') and hasattr(model.decoder, 'merge_and_unload'):
-        # PEFT model - merge and unload
+    if hasattr(model, "decoder") and hasattr(model.decoder, "merge_and_unload"):
         model.decoder = model.decoder.merge_and_unload()
         logger.info("LoRA weights merged into base model")
     else:
@@ -481,10 +480,9 @@ def get_lora_info(model) -> Dict[str, Any]:
 
     for name, param in model.named_parameters():
         total_params += param.numel()
-        if 'lora_' in name:
+        if "lora_" in name:
             lora_params += param.numel()
-            # Extract module name
-            module_name = name.rsplit('.lora_', 1)[0]
+            module_name = name.rsplit(".lora_", 1)[0]
             if module_name not in lora_modules:
                 lora_modules.append(module_name)
 

@@ -459,7 +459,7 @@ class InitServiceMixinTests(unittest.TestCase):
         self.assertIn("torchao is required", str(ctx.exception))
 
     def test_load_model_context_yields_immediately_when_offload_disabled(self):
-        """It does not move models when offload_to_cpu is disabled."""
+        """It does not move models when offload_to_cpu is disabled and model on correct device."""
         host = _Host(project_root="K:/fake_root", device="cpu")
         host.offload_to_cpu = False
         host.model = torch.nn.Linear(1, 1)
@@ -467,6 +467,22 @@ class InitServiceMixinTests(unittest.TestCase):
             with host._load_model_context("model"):
                 pass
         move_mock.assert_not_called()
+
+    def test_load_model_context_recovers_stranded_model_when_offload_disabled(self):
+        """It recovers a model stranded on CPU when offload_to_cpu is False.
+
+        Training routes offload components to CPU and restore() may fail
+        silently.  The defensive check in _load_model_context should detect
+        the mismatch and move the model back to the target device.
+        """
+        host = _Host(project_root="K:/fake_root", device="cuda")
+        host.offload_to_cpu = False
+        # Simulate text_encoder stranded on CPU after training restore failure
+        host.text_encoder = torch.nn.Linear(1, 1).to("cpu")
+        with patch.object(host, "_recursive_to_device") as move_mock:
+            with host._load_model_context("text_encoder"):
+                pass
+        move_mock.assert_called_once_with(host.text_encoder, "cuda", host.dtype)
 
     def test_load_model_context_loads_and_offloads_when_enabled_for_vae(self):
         """It performs load/offload calls around the context body for VAE."""

@@ -1,4 +1,4 @@
-﻿#Exclude potential (c) training data
+#Exclude potential (c) training data
 *_lyrics.txt
 *.mp3
 AlbumArt*.jpg
@@ -244,23 +244,7 @@ huggingface/
 .windsurf/
 acestep/third_parts/vllm/
 test_lora_scale_fix.py
-steering_vectors/
-!steering_vectors/.gitkeep
 lokr_output/
 
-# AI agent config (local only)
-.agents/
-.agent/
-.claude/
-.gemini/
-stems_output/
-
-# Audio files — NEVER commit these
-*.wav
-*.mp3
-*.flac
-*.ogg
-*.aac
-*.wma
-*.m4a
-*.opus
+# macOS
+.DS_Store

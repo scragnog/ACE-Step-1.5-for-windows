@@ -126,13 +126,15 @@ def register_lokr_training_start_route(
 
         handler.model.decoder = unwrap_module(handler.model.decoder)
         mgr = RuntimeComponentManager(handler=handler, llm=app.state.llm_handler, app_state=app.state)
-        mgr.move_decoder_to(str(handler.device))
+        # Offload non-decoder components FIRST, then move decoder to GPU.
+        # This prevents OOM when decoder and other components coexist on GPU.
         mgr.offload_vae_to_cpu()
         mgr.offload_text_encoder_to_cpu()
         mgr.offload_model_encoder_to_cpu()
         mgr.offload_model_tokenizer_to_cpu()
         mgr.offload_model_detokenizer_to_cpu()
         mgr.unload_llm()
+        mgr.move_decoder_to(str(handler.device))
         mgr.flush_gpu_cache()
 
         try:

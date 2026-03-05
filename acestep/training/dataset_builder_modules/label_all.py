@@ -100,20 +100,25 @@ class LabelAllMixin:
                     target_device = dit_handler.device
                     if isinstance(target_device, str):
                         target_device = torch.device(target_device)
-                    silence_device = silence_latent.device
-                    if silence_device.type != target_device.type:
-                        raise RuntimeError(
-                            f"silence_latent on {silence_device}, expected {target_device}"
-                        )
-                    if (
-                        target_device.type == "cuda"
-                        and target_device.index is not None
-                        and silence_device.index is not None
-                        and silence_device.index != target_device.index
-                    ):
-                        raise RuntimeError(
-                            f"silence_latent on {silence_device}, expected {target_device}"
-                        )
+
+                    # Skip strict device check when CPU offloading is enabled;
+                    # models/tensors start on CPU and are moved on-demand via context.
+                    offload_to_cpu = getattr(dit_handler, "offload_to_cpu", False)
+                    if not offload_to_cpu:
+                        silence_device = silence_latent.device
+                        if silence_device.type != target_device.type:
+                            raise RuntimeError(
+                                f"silence_latent on {silence_device}, expected {target_device}"
+                            )
+                        if (
+                            target_device.type == "cuda"
+                            and target_device.index is not None
+                            and silence_device.index is not None
+                            and silence_device.index != target_device.index
+                        ):
+                            raise RuntimeError(
+                                f"silence_latent on {silence_device}, expected {target_device}"
+                            )
                 except Exception as e:
                     logger.error(f"Tokenize precheck failed: {e}")
                     for i, _ in chunk:

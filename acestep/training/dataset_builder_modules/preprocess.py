@@ -129,6 +129,10 @@ class PreprocessMixin:
 
         device = device if isinstance(device, torch.device) else torch.device(device)
 
+        # When CPU offloading is enabled, models start on CPU and are moved to GPU
+        # on-demand via _load_model_context. Skip strict device checks in this mode.
+        offload_to_cpu = getattr(dit_handler, "offload_to_cpu", False)
+
         def _device_compatible(actual: torch.device, expected: torch.device) -> bool:
             if actual.type != expected.type:
                 return False
@@ -136,18 +140,19 @@ class PreprocessMixin:
                 return True
             return actual.index == expected.index
 
-        vae_param = next(vae.parameters(), None)
-        vae_device = getattr(vae_param, "device", device)
-        if not _device_compatible(vae_device, device):
-            raise RuntimeError(f"VAE is on {vae_device}, expected {device}")
+        if not offload_to_cpu:
+            vae_param = next(vae.parameters(), None)
+            vae_device = getattr(vae_param, "device", device)
+            if not _device_compatible(vae_device, device):
+                raise RuntimeError(f"VAE is on {vae_device}, expected {device}")
 
-        text_param = next(text_encoder.parameters(), None)
-        text_device = getattr(text_param, "device", device)
-        if not _device_compatible(text_device, device):
-            raise RuntimeError(f"Text encoder is on {text_device}, expected {device}")
+            text_param = next(text_encoder.parameters(), None)
+            text_device = getattr(text_param, "device", device)
+            if not _device_compatible(text_device, device):
+                raise RuntimeError(f"Text encoder is on {text_device}, expected {device}")
 
-        if not _device_compatible(silence_latent.device, device):
-            raise RuntimeError(f"silence_latent is on {silence_latent.device}, expected {device}")
+            if not _device_compatible(silence_latent.device, device):
+                raise RuntimeError(f"silence_latent is on {silence_latent.device}, expected {device}")
 
         target_sample_rate = 48000
 
