@@ -233,6 +233,70 @@ def register_lora_routes(
             result["advanced"] = advanced
         return wrap_response(result)
 
+    # ── File browser endpoint ────────────────────────────────────────
+
+    @app.get("/v1/lora/list-files")
+    async def list_lora_files_endpoint(folder: str = "", _: None = Depends(verify_api_key)):
+        """List adapter files in the given directory."""
+        if not folder:
+            return wrap_response(None, code=400, error="Missing 'folder' query parameter")
+
+        # Resolve relative paths against project root
+        if not os.path.isabs(folder):
+            folder = os.path.join(get_project_root(), folder)
+
+        if not os.path.isdir(folder):
+            return wrap_response(None, code=400, error=f"Directory not found: {folder}")
+
+        ADAPTER_EXTENSIONS = {".safetensors", ".bin", ".pt"}
+        files = []
+        try:
+            for entry in os.scandir(folder):
+                if entry.is_file():
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in ADAPTER_EXTENSIONS:
+                        stat = entry.stat()
+                        adapter_type = "lokr" if "lokr" in entry.name.lower() else (
+                            "lora" if "lora" in entry.name.lower() else "unknown"
+                        )
+                        files.append({
+                            "name": entry.name,
+                            "path": entry.path.replace("\\", "/"),
+                            "size": stat.st_size,
+                            "type": adapter_type,
+                        })
+                elif entry.is_dir():
+                    # Check for adapter directories (contain adapter_config.json)
+                    config_path = os.path.join(entry.path, "adapter_config.json")
+                    if os.path.isfile(config_path):
+                        files.append({
+                            "name": entry.name,
+                            "path": entry.path.replace("\\", "/"),
+                            "size": 0,
+                            "type": "peft_dir",
+                        })
+                    # Also check for safetensors files inside subdirs
+                    for sub_entry in os.scandir(entry.path):
+                        if sub_entry.is_file():
+                            ext = os.path.splitext(sub_entry.name)[1].lower()
+                            if ext in ADAPTER_EXTENSIONS:
+                                stat = sub_entry.stat()
+                                adapter_type = "lokr" if "lokr" in sub_entry.name.lower() else (
+                                    "lora" if "lora" in sub_entry.name.lower() else "unknown"
+                                )
+                                files.append({
+                                    "name": f"{entry.name}/{sub_entry.name}",
+                                    "path": sub_entry.path.replace("\\", "/"),
+                                    "size": stat.st_size,
+                                    "type": adapter_type,
+                                })
+        except PermissionError:
+            return wrap_response(None, code=403, error=f"Permission denied: {folder}")
+        except Exception as exc:
+            return wrap_response(None, code=500, error=f"Failed to scan folder: {str(exc)}")
+
+        return wrap_response({"files": files, "folder": folder})
+
     # ── Advanced adapter endpoints ──────────────────────────────────
 
     @app.post("/v1/lora/group-scales")
