@@ -10,6 +10,18 @@ An enhanced fork of [sdbds/ACE-Step-1.5-for-windows](https://github.com/sdbds/AC
 
 > Full details and implementation notes in [FEATURES.md](FEATURES.md).
 
+### 🎵 Melodic Variation
+A **Melodic Variation** slider in the Create panel adds controlled melodic randomness to generation by adjusting the LM's repetition penalty (0.0–2.0). Higher values push the language model to explore less-repeated patterns, introducing more melodic variety and structural unpredictability. Lower values reinforce repetition and structural consistency.
+
+### 🏆 Quality Scoring (PMI + DiT Alignment)
+Automatic quality scoring system displayed alongside every generated track. Each generation reports two metrics: **PMI Score** (Pointwise Mutual Information — measures lyric-audio semantic coherence, displayed as a percentage) and **DiT Score** (alignment between the DiT and LM outputs, displayed as a 1–5 star rating). Scores appear in the generation info panel and song details sidebar. Toggle on/off via the Score System accordion.
+
+### ⏹ Job Cancellation & Queue Management
+Cancel any running or queued generation job without restarting the server. A **Cancel** button appears on each job in the track list during generation. The Python backend exposes a `POST /v1/cancel/{job_id}` endpoint that sends a cooperative stop signal, allowing the current inference step to complete cleanly before halting. Queued jobs are cleared immediately.
+
+### ⬆️ Upscale to HQ
+Re-run inference on a previously generated track at higher quality settings without starting from scratch. The **Upscale to HQ** option in a song's dropdown menu re-submits the original generation parameters with increased inference steps, preserving the audio codes from the original run to guide the upscale pass. Configure the HQ step count in Settings. Useful for previewing at low steps (20–50) then upgrading favorites to high-fidelity (100–200 steps).
+
 ### 🧠 Advanced Guidance & Solvers
 Total control over the generation pipeline with 7 unique mathematical guidance modes (APG, ADG, PAG, Plain CFG, CFG++, Dynamic CFG, Rescaled CFG) and 4 ODE solver algorithms (Euler, Heun, DPM++ 2M, RK4). Includes 40+ multilingual educational tooltips explaining every generation parameter.
 

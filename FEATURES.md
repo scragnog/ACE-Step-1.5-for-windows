@@ -6,6 +6,115 @@ This document tracks all new features added on top of the upstream [sdbds/ACE-St
 
 ---
 
+## Melodic Variation
+
+**Branch:** `qinglong`
+**Status:** ✅ Merged
+
+A slider that adds controlled melodic randomness to generation by adjusting the language model's repetition penalty. Higher values encourage the LM to explore less-repeated token sequences, introducing more melodic variety; lower values reinforce repetitive structure.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/inference.py` | `lm_repetition_penalty` added to `GenerationParams` dataclass |
+| `acestep/api_server.py` | `lm_repetition_penalty` added to request model, alias mapping, and passed to GenerationParams |
+| `acestep/llm_inference.py` | `repetition_penalty` forwarded as float to both `vllm` and native `generate()` LLM handlers |
+| `ace-step-ui` | Melodic Variation slider (0.0–2.0) in the Generation Settings accordion |
+
+### How it works
+
+1. The slider maps to `lm_repetition_penalty` (0.0–2.0, default 1.0 = no effect)
+2. Values above 1.0 penalise tokens that have already appeared, nudging the LM away from repetitive melodic phrases
+3. Values below 1.0 make repetition more likely — useful for looping, hypnotic, or structurally strict styles
+4. The parameter is forwarded directly to the LM `generate()` call's `repetition_penalty` argument (both vLLM and native paths)
+
+---
+
+## Quality Scoring (PMI + DiT Alignment)
+
+**Branch:** `qinglong`
+**Status:** ✅ Merged
+
+Automatic quality scoring computed at the end of each generation and displayed in the UI. Two complementary metrics assess different aspects of generation quality.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/inference.py` | `get_scores` / `score_scale` wired through `GenerationParams`; scores returned in result dict |
+| `acestep/api_server.py` | `get_scores` and `score_scale` added to request model and `_build_request()` mapping; scores included in response |
+| `ace-step-ui/server/src/routes/generate.ts` | Forwards `getScores` / `scoreScale` to Python backend |
+| `ace-step-ui/components/accordions/ScoreSystemAccordion.tsx` | Toggle and scale slider for the scoring system |
+| `ace-step-ui/components/SongCard.tsx` | Score badges (PMI % and star ratings) on each song card |
+| `ace-step-ui/components/RightSidebar.tsx` | Score badges in the Song Details panel |
+
+### How it works
+
+1. **PMI Score** — Pointwise Mutual Information between the lyric tokens and the generated audio codes. Measures how strongly the audio content correlates with the lyric semantics. Displayed as a percentage (0–100%).
+2. **DiT Score** — Alignment between the DiT (diffusion transformer) output and the LM-guided audio codes. Measures how faithfully the audio synthesis followed the language model's musical intent. Displayed as a 1–5 star rating.
+3. Scores are computed in the Python backend after generation and returned in the API response alongside the audio path.
+4. Enable/disable via the **Score System** accordion in the Create panel. `score_scale` controls weighting of score-guided beam-search (if applicable).
+5. Both scores appear as compact badges on each `SongCard` in the track list and in the Song Details sidebar.
+
+---
+
+## Job Cancellation & Queue Management
+
+**Branch:** `qinglong`
+**Status:** ✅ Merged
+
+Cancel any running or queued generation job without restarting the server. Sends a cooperative stop signal to the Python backend that halts inference at the next safe checkpoint.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/api_server.py` | `POST /v1/cancel/{job_id}` endpoint — sets a per-job cancellation flag read by the inference loop |
+| `ace-step-ui/server/src/routes/generate.ts` | Express proxy for the cancel endpoint |
+| `ace-step-ui/services/api.ts` | `cancelJob(jobId)` API client method |
+| `ace-step-ui/components/SongList.tsx` | Cancel button visible on in-progress song cards |
+| `ace-step-ui/components/SongCard.tsx` | Cancel button in compact view |
+
+### How it works
+
+1. Each generation job is assigned a unique `job_id` at submission time
+2. During inference, the generation loop checks a shared cancellation flag keyed by `job_id` at each denoising step
+3. When **Cancel** is clicked, `POST /v1/cancel/{job_id}` sets the flag — the running job exits cleanly at its next step boundary (no mid-tensor corruption)
+4. Queued jobs (not yet started) are removed from the queue immediately on cancel
+5. The cancelled song entry is removed from the track list
+
+---
+
+## Upscale to HQ
+
+**Branch:** `qinglong`
+**Status:** ✅ Merged
+
+Re-run inference on a previously generated preview track at higher quality settings. Preserves the audio codes from the first pass to guide the upscale, producing a higher-fidelity version of the same generation without starting from scratch.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/inference.py` | `lm_hints_path` field in `GenerationParams`; `precomputed_lm_hints_25Hz` tensor surfaced from `service_generate_outputs` and saved as `.pt` file alongside audio |
+| `acestep/api_server.py` | `audio_code_string` field added to `GenerateMusicRequest`; generated `audio_codes` included in API response; `GET /v1/audio/{path}` serves `.pt` hint files |
+| `acestep/core/generation/handler/service_generate_outputs.py` | Surfaces `precomputed_lm_hints_25Hz` from generation outputs |
+| `ace-step-ui` | **Upscale to HQ** option in the `SongDropdownMenu`; HQ steps config in `SettingsModal`; `App.tsx` handler re-submits with stored `audioCodes` |
+
+### How it works
+
+1. **First pass (Preview):** Generate at low steps (e.g. 20–50). The Python backend saves the raw LM audio code tensor (`.pt` file) alongside the audio file. The API response includes the serialized `audio_codes` string.
+2. **Upscale:** Click **Upscale to HQ** from the song's dropdown menu. The frontend re-submits the original generation parameters with:
+   - The stored `audio_codes` from the first pass (bypasses LM re-generation)
+   - `lm_hints_path` pointing to the saved `.pt` tensor file
+   - The HQ step count from Settings (default: 150)
+3. The diffusion model runs the higher-step denoising pass guided by the first-pass audio codes, producing a cleaner, higher-fidelity render of the same musical content
+4. Configure the HQ step count in **Settings → Upscale**
+5. Toast notification auto-dismisses after 5s when the upscale job is queued
+
+---
+
 ## Tempo Scale & Pitch Shift (Cover Mode)
 
 **Branch:** `qinglong`  
