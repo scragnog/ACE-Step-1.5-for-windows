@@ -85,6 +85,26 @@ def is_xpu_available() -> bool:
         return False
 
 
+def is_rocm_available() -> bool:
+    """Return whether the active CUDA device is an AMD ROCm/HIP device.
+
+    On ROCm, PyTorch exposes the GPU as a CUDA device but also sets
+    ``torch.version.hip``.  This function returns ``True`` only when
+    *both* conditions hold: a CUDA device is present **and** the build
+    is a ROCm/HIP build.
+    """
+    try:
+        import torch
+
+        return (
+            torch.cuda.is_available()
+            and hasattr(torch.version, "hip")
+            and torch.version.hip is not None
+        )
+    except Exception:
+        return False
+
+
 # ===========================================================================
 # Empirical VRAM measurements (GB) -- model weights only, bf16 precision
 # These values should be calibrated using scripts/profile_vram.py
