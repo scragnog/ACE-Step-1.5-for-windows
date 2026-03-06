@@ -251,3 +251,9 @@ lokr_output/
 acestep_output/
 # macOS
 .DS_Store
+
+# VitePress / Node
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+package-lock.json
