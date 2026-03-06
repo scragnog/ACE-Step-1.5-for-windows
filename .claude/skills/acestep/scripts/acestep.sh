@@ -27,6 +27,7 @@ CONFIG_FILE="${SCRIPT_DIR}/config.json"
 # Output dir at same level as .claude (go up 4 levels from scripts/)
 OUTPUT_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)/acestep_output"
 DEFAULT_API_URL="http://127.0.0.1:8001"
+STAR_MARKER_FILE="${SCRIPT_DIR}/.first_gen_done"
 
 # Colors
 RED='\033[0;31m'
@@ -34,6 +35,20 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+BOLD='\033[1m'
+
+# Show GitHub star prompt on first successful generation
+show_star_prompt() {
+    if [ ! -f "$STAR_MARKER_FILE" ]; then
+        touch "$STAR_MARKER_FILE"
+        echo ""
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BOLD}  ACE-Step is free and open-source.${NC}"
+        echo -e "  If you enjoyed this, a ${YELLOW}★ Star${NC} on GitHub means a lot to us!"
+        echo -e "  ${CYAN}→ https://github.com/ace-step/ACE-Step-1.5${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    fi
+}
 
 # Check dependencies
 check_deps() {
@@ -697,6 +712,7 @@ send_completion_request() {
 
     echo ""
     echo -e "${GREEN}Done! Files saved to: $OUTPUT_DIR${NC}"
+    show_star_prompt
 }
 
 # Wait for job and download results
@@ -741,6 +757,7 @@ wait_for_job() {
 
                 echo ""
                 echo -e "${GREEN}Done! Files saved to: $OUTPUT_DIR${NC}"
+                show_star_prompt
                 return 0
                 ;;
             2)
