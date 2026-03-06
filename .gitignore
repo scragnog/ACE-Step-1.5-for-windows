@@ -246,6 +246,7 @@ huggingface/
 acestep/third_parts/vllm/
 test_lora_scale_fix.py
 lokr_output/
-
+.claude/skills/acestep/scripts/config.json
+acestep_output/
 # macOS
 .DS_Store
