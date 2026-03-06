@@ -92,8 +92,8 @@ export default defineConfig({
     },
 
     footer: {
-      message: 'Released under the Apache 2.0 License.',
-      copyright: 'Copyright 2024-present ACE-Step Team',
+      message: 'Released under the MIT License.',
+      copyright: 'Copyright 2025-present ACE-Step Team',
     },
   },
 })
