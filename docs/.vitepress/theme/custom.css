@@ -38,3 +38,16 @@
     --vp-home-hero-image-filter: blur(68px);
   }
 }
+
+/* Nav logo: invert on light mode (logo is white-on-black) */
+:root .VPNavBarTitle .logo {
+  filter: invert(1);
+}
+.dark .VPNavBarTitle .logo {
+  filter: none;
+}
+
+/* Hero image: round corners */
+.VPImage.image-src {
+  border-radius: 16px;
+}

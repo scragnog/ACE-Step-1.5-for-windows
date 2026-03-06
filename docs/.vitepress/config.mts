@@ -10,12 +10,14 @@ export default defineConfig({
   ignoreDeadLinks: [
     /localhost/,
     /\.\.\/\.\.\/README/,
-    // Missing translations — link to English fallback
+    // Missing translations
     /\.\/BENCHMARK/,
+    // Links from awesome-ace-step README (external repo)
+    /\.\/CONTRIBUTING/,
   ],
 
   head: [
-    ['link', { rel: 'icon', type: 'image/png', href: '/ACE-Step-1.5/favicon.png' }],
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/ACE-Step-1.5/favicon.svg' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:title', content: 'ACE-Step 1.5 Documentation' }],
     ['meta', { name: 'og:description', content: 'Open-Source Music Generation Foundation Model' }],
@@ -130,6 +132,10 @@ function navEN() {
       text: 'SideStep',
       link: '/sidestep/Getting Started',
     },
+    {
+      text: 'Ecosystem',
+      link: '/en/awesome',
+    },
   ]
 }
 
@@ -170,10 +176,17 @@ function sidebarEN() {
           { text: 'ROCm on Linux', link: '/en/ACE-Step1.5-Rocm-Manual-Linux' },
         ],
       },
+      {
+        text: 'Ecosystem',
+        items: [
+          { text: 'Awesome ACE-Step', link: '/en/awesome' },
+        ],
+      },
     ],
     '/sidestep/': [
       {
         text: 'SideStep',
+        link: 'https://github.com/koda-dernet/Side-Step',
         items: [
           { text: 'Getting Started', link: '/sidestep/Getting Started' },
           { text: 'Dataset Preparation', link: '/sidestep/Dataset Preparation' },
@@ -221,6 +234,10 @@ function navZH() {
         { text: '评测', link: '/zh/BENCHMARK' },
         { text: 'GPU 兼容性', link: '/zh/GPU_COMPATIBILITY' },
       ],
+    },
+    {
+      text: '生态',
+      link: '/en/awesome',
     },
   ]
 }
@@ -289,6 +306,10 @@ function navJA() {
         { text: 'GPU 互換性', link: '/ja/GPU_COMPATIBILITY' },
       ],
     },
+    {
+      text: 'エコシステム',
+      link: '/en/awesome',
+    },
   ]
 }
 
@@ -353,6 +374,10 @@ function navKO() {
         { text: 'LoRA 학습', link: '/ko/LoRA_Training_Tutorial' },
         { text: 'GPU 호환성', link: '/ko/GPU_COMPATIBILITY' },
       ],
+    },
+    {
+      text: '에코시스템',
+      link: '/en/awesome',
     },
   ]
 }
