@@ -78,12 +78,46 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # Audio processing libraries
         libsndfile1 \
         libsndfile1-dev \
-        ffmpeg \
+        # FFmpeg build dependencies (we build FFmpeg 7 from source for torchcodec)
+        nasm \
+        yasm \
+        libx264-dev \
+        libx265-dev \
+        libmp3lame-dev \
+        libopus-dev \
+        libvorbis-dev \
         # BLAS / LAPACK for scipy & numpy on aarch64
         libopenblas-dev \
         liblapack-dev \
         gfortran \
     && rm -rf /var/lib/apt/lists/*
+
+# ==================== FFmpeg 7 (from source) ====================
+# torchcodec 0.10.0 requires FFmpeg 7 shared libraries (libavfilter.so.10,
+# libavcodec.so.61, etc.). Ubuntu 22.04 ships FFmpeg 4.4 which is too old.
+# We build a minimal FFmpeg 7.1 with shared libs and install to /usr/local.
+ARG FFMPEG_VERSION=7.1
+RUN cd /tmp \
+    && curl -fSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz \
+    && tar xf ffmpeg.tar.xz \
+    && cd ffmpeg-${FFMPEG_VERSION} \
+    && ./configure \
+        --prefix=/usr/local \
+        --enable-shared \
+        --disable-static \
+        --enable-gpl \
+        --enable-libx264 \
+        --enable-libx265 \
+        --enable-libmp3lame \
+        --enable-libopus \
+        --enable-libvorbis \
+        --disable-doc \
+        --disable-programs \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && cd /tmp && rm -rf ffmpeg* \
+    && echo "FFmpeg $(ffmpeg -version 2>&1 | head -1 || echo 'libs installed')"
 
 # Ensure 'python' -> python3 symlink exists.
 RUN ln -sf /usr/bin/python3 /usr/bin/python
@@ -120,6 +154,26 @@ RUN pip install --no-cache-dir nvidia-cudss-cu12 \
     && python -c "import torch; print(f'PyTorch {torch.__version__}  CUDA avail: {torch.cuda.is_available()}  Archs: {torch.cuda.get_arch_list()}')" \
     || echo "WARNING: torch import check failed (expected during build without GPU — will work at runtime with --runtime nvidia)"
 
+# torchcodec — required by torchaudio 2.9+ as the default audio decoder.
+# The Jetson AI Lab prebuilt wheel has an ABI mismatch (links against desktop
+# NVDEC / libnvcuvid.so.1 which doesn't exist on Jetson).  We build v0.10.0
+# from source with ENABLE_CUDA=0 (CPU-only FFmpeg decode, which is all we need
+# for audio).  pybind11 is required at build time.
+# HARD REQUIREMENT: build will fail if torchcodec cannot be compiled.
+ARG TORCHCODEC_VERSION=v0.10.0
+RUN pip install --no-cache-dir pybind11 \
+    && cd /tmp \
+    && git clone --depth 1 --branch ${TORCHCODEC_VERSION} \
+        https://github.com/pytorch/torchcodec.git \
+    && cd torchcodec \
+    && CMAKE_PREFIX_PATH="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())'):${CMAKE_PREFIX_PATH}" \
+       PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}" \
+       ENABLE_CUDA=0 \
+       I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 \
+       pip install --no-cache-dir --no-build-isolation . \
+    && cd /tmp && rm -rf torchcodec \
+    && python -c "import torchcodec; print(f'torchcodec {torchcodec.__version__}')"
+
 # ==================== Project source ====================
 WORKDIR /app
 COPY . /app/
@@ -132,7 +186,7 @@ COPY . /app/
 # Excluded packages (Jetson-incompatible):
 #   - torch/torchvision/torchaudio  → already installed from Jetson wheels
 #   - mlx / mlx-lm                  → Apple Silicon only
-#   - torchcodec                    → excluded for aarch64 in upstream pyproject.toml
+#   - torchcodec                    → installed separately from Jetson AI Lab index
 
 # Core + training + API dependencies
 RUN pip install --no-cache-dir \
@@ -159,15 +213,15 @@ RUN pip install --no-cache-dir \
         "tensorboard>=2.20.0" \
         "typer-slim>=0.21.1" \
         "xxhash" \
-        "pyyaml"
+        "pyyaml" \
+        "bitsandbytes>=0.49.0"
 
 # torchao — DISABLED on Jetson.
-# diffusers 0.36.0 has a bug in its torchao quantizer integration: when torchao
-# is present but the UInt4Tensor module layout doesn't match, the error handler
-# references an undefined `logger` variable, crashing VAE model loading entirely.
-# Quantization features are not critical for Jetson inference.
-# RUN pip install --no-cache-dir torchao 2>/dev/null \
-#     || echo "WARNING: torchao install failed (non-fatal)"
+# The original diffusers 0.36.0 logger bug is fixed in 0.37.0+, but torchao
+# 0.16.0 skips its C++ extensions with torch 2.9.1 ("incompatible torch
+# version") making quantization ops non-functional.  Since ACE-Step does not
+# use torchao quantization, installing it adds noise without benefit.
+# Re-evaluate when Jetson AI Lab ships a torch build that torchao supports.
 
 # ==================== Triton + nano-vllm ====================
 # Triton aarch64 wheels are available on the Jetson AI Lab index.
@@ -176,6 +230,7 @@ RUN pip install --no-cache-dir \
 # symbols). nano-vllm gracefully falls back to SDPA attention without flash-attn.
 # nano-vllm is installed from the bundled source with --no-deps to avoid pulling
 # x86-only flash-attn wheels from its pyproject.toml.
+# HARD REQUIREMENT: build will fail if nano-vllm cannot be installed.
 #
 # Triton requires ptxas and cuda.h from the CUDA toolkit — we set the env var
 # and create a symlink so triton's nvidia backend can find them.
@@ -187,8 +242,7 @@ RUN pip install --no-cache-dir \
     && ln -sf /usr/local/cuda/include/cuda.h \
               /usr/local/lib/python3.10/dist-packages/triton/backends/nvidia/include/cuda.h \
     && pip install --no-cache-dir --no-deps /app/acestep/third_parts/nano-vllm \
-    && python -c "import nanovllm; print('nano-vllm OK')" \
-    || echo "WARNING: nano-vllm install failed (non-fatal — will fall back to pt backend)"
+    && python -c "import nanovllm; print('nano-vllm OK')"
 
 # ==================== Runtime directories ====================
 RUN mkdir -p /app/checkpoints /app/gradio_outputs

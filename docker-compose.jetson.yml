@@ -76,6 +76,10 @@ services:
       - hf_cache:/root/.cache/huggingface
       # Generated audio output
       - ./gradio_outputs:/app/gradio_outputs
+      # LoRA training output — persists trained adapters across rebuilds
+      - ./lora_output:/app/lora_output
+      # ACE-Step generation output
+      - ./acestep_output:/app/acestep_output
 
     # ---- Resource management ----
     # Shared memory — needed for PyTorch DataLoader workers
