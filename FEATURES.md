@@ -796,27 +796,24 @@ Pluggable timestep distribution system for the diffusion process. Controls *wher
 
 | File | Description |
 |------|-------------|
-| `acestep/schedulers.py` | **[NEW]** Registry + 5 schedule implementations: `linear`, `ddim_uniform`, `sgm_uniform`, `bong_tangent`, `linear_quadratic` |
+| `acestep/core/generation/schedulers.py` | **[NEW]** Registry + 6 schedule implementations including composite 2-stage |
 | `acestep/models/sft/modeling_acestep_v15_base.py` | Integrated `get_schedule()` into `generate_audio()` (SFT variant) |
 | `acestep/models/base/modeling_acestep_v15_base.py` | Integrated `get_schedule()` into `generate_audio()` (base variant) |
 | `acestep/inference.py` | `scheduler` field in `GenerationParams` dataclass |
-| `acestep/api/http/release_task_models.py` | `scheduler` field in `GenerateMusicRequest` |
-| `acestep/api/http/release_task_param_parser.py` | Alias mapping for `scheduler` |
-| `acestep/api/http/release_task_request_builder.py` | Parses and passes `scheduler` to request model |
-| `acestep/api/job_generation_setup.py` | Passes `scheduler` from request to `GenerationParams` |
-| `acestep/core/generation/handler/service_generate_execute.py` | `scheduler=` added to diffusion log line |
-| Full handler chain | Threaded through `diffusion` → `service_generate_execute` → `service_generate` → `generate_music_execute` → `generate_music` |
-| `ace-step-ui` | Scheduler dropdown in Generation Settings, metadata display in RightSidebar, i18n strings |
+| Full API chain (4 files) | `scheduler` wired through request model, parser, builder, setup |
+| Full handler chain (5 files) | Threaded through `diffusion` → `service_generate_execute` → `service_generate` → `generate_music_execute` → `generate_music` |
+| `ace-step-ui` | Scheduler dropdown, composite sub-controls (Stage A/B, crossover, split), metadata display, i18n strings |
 
 ### Available schedulers
 
 | Scheduler | Description |
 |-----------|-------------|
 | **Linear** (default) | Uniform spacing. Backward-compatible with all existing workflows. |
-| **DDIM Uniform** | Uniform in σ-space. Concentrates steps where noise changes fastest. |
-| **SGM Uniform** | Uniform in σ²-space (EDM convention). Similar curvature to DDIM. |
+| **DDIM Uniform** | Log-SNR uniform in logit(t) space. S-shaped distribution — dense around t=0.5, balanced structure and detail. |
+| **SGM Uniform** | Karras σ-ramp (ρ=7). Moderate front-loading for structural focus without starving detail. |
 | **Bong Tangent** | Tangent-based front-loading. More budget for structural decisions. |
 | **Linear Quadratic** | Linear start → quadratic end. More budget for fine detail refinement. |
+| **Composite (2-Stage)** | Two-stage: pick different schedulers for the structural (high noise) and detail (low noise) phases. |
 
 ### How it works
 
@@ -825,6 +822,17 @@ Pluggable timestep distribution system for the diffusion process. Controls *wher
 3. Select a scheduler from the **Timestep Scheduler** dropdown in Generation Settings (below the Solver dropdown)
 4. The scheduler name is logged alongside solver, guidance, and steps in the diffusion info line
 5. Default is `linear` — existing generations are unaffected unless you explicitly change it
+
+### Composite (2-Stage) scheduler
+
+Inspired by ComfyUI's multi-pass denoising workflows, the **Composite** scheduler splits the diffusion trajectory into two phases at a configurable crossover timestep:
+
+- **Stage A (Structure):** Handles the high-noise region (t=1 → crossover). Choose any scheduler for this phase — e.g., Bong Tangent for strong structural decisions.
+- **Stage B (Detail):** Handles the low-noise region (crossover → 0). Choose a different scheduler — e.g., Linear Quadratic for fine detail refinement.
+- **Crossover** (0.1–0.9): The timestep value where Stage A ends and Stage B begins. Default 0.5.
+- **Step Split** (0.1–0.9): Fraction of total steps allocated to Stage A. Default 0.5 = equal split.
+
+When "Composite (2-Stage)" is selected, a purple-bordered panel appears below the dropdown with Stage A/B dropdowns, Crossover slider, and Step Split slider. The composite config is encoded in the scheduler string (e.g., `composite:bong_tangent+linear_quadratic:0.50:0.60`) and flows through the entire pipeline transparently.
 
 ---
 
