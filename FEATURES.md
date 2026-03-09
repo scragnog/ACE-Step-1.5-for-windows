@@ -785,6 +785,50 @@ Brief description.
 
 ---
 
+## Timestep Scheduler
+
+**Branch:** `qinglong`  
+**Status:** ✅ Merged
+
+Pluggable timestep distribution system for the diffusion process. Controls *where* denoising steps are concentrated across the noise schedule, complementing the existing solver (which controls *how* each step is computed) and guidance mode (which controls *what direction* each step moves).
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/schedulers.py` | **[NEW]** Registry + 5 schedule implementations: `linear`, `ddim_uniform`, `sgm_uniform`, `bong_tangent`, `linear_quadratic` |
+| `acestep/models/sft/modeling_acestep_v15_base.py` | Integrated `get_schedule()` into `generate_audio()` (SFT variant) |
+| `acestep/models/base/modeling_acestep_v15_base.py` | Integrated `get_schedule()` into `generate_audio()` (base variant) |
+| `acestep/inference.py` | `scheduler` field in `GenerationParams` dataclass |
+| `acestep/api/http/release_task_models.py` | `scheduler` field in `GenerateMusicRequest` |
+| `acestep/api/http/release_task_param_parser.py` | Alias mapping for `scheduler` |
+| `acestep/api/http/release_task_request_builder.py` | Parses and passes `scheduler` to request model |
+| `acestep/api/job_generation_setup.py` | Passes `scheduler` from request to `GenerationParams` |
+| `acestep/core/generation/handler/service_generate_execute.py` | `scheduler=` added to diffusion log line |
+| Full handler chain | Threaded through `diffusion` → `service_generate_execute` → `service_generate` → `generate_music_execute` → `generate_music` |
+| `ace-step-ui` | Scheduler dropdown in Generation Settings, metadata display in RightSidebar, i18n strings |
+
+### Available schedulers
+
+| Scheduler | Description |
+|-----------|-------------|
+| **Linear** (default) | Uniform spacing. Backward-compatible with all existing workflows. |
+| **DDIM Uniform** | Uniform in σ-space. Concentrates steps where noise changes fastest. |
+| **SGM Uniform** | Uniform in σ²-space (EDM convention). Similar curvature to DDIM. |
+| **Bong Tangent** | Tangent-based front-loading. More budget for structural decisions. |
+| **Linear Quadratic** | Linear start → quadratic end. More budget for fine detail refinement. |
+
+### How it works
+
+1. Each scheduler maps the denoising step count to a sequence of timestep values between 0 and 1
+2. The scheduler runs *after* the shift parameter is applied, so both compose naturally
+3. Select a scheduler from the **Timestep Scheduler** dropdown in Generation Settings (below the Solver dropdown)
+4. The scheduler name is logged alongside solver, guidance, and steps in the diffusion info line
+5. Default is `linear` — existing generations are unaffected unless you explicitly change it
+
+---
+
+
 ## Audio Enhancement Studio
 
 **Branch:** `feature/audio-enhancer`  

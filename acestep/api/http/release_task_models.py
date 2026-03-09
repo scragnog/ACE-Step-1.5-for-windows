@@ -77,6 +77,7 @@ class GenerateMusicRequest(BaseModel):
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
     infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
+    scheduler: str = Field(default="linear", description="Timestep scheduler: linear, ddim_uniform, sgm_uniform, bong_tangent, linear_quadratic")
 
     # ── PAG (Perturbed Attention Guidance) ─────────────────────────
     use_pag: bool = Field(default=False, description="Enable Perturbed Attention Guidance")

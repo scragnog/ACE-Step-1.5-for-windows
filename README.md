@@ -25,6 +25,9 @@ Re-run inference on a previously generated track at higher quality settings with
 ### 🧠 Advanced Guidance & Solvers
 Total control over the generation pipeline with 7 unique mathematical guidance modes (APG, ADG, PAG, Plain CFG, CFG++, Dynamic CFG, Rescaled CFG) and 4 ODE solver algorithms (Euler, Heun, DPM++ 2M, RK4). Includes 40+ multilingual educational tooltips explaining every generation parameter.
 
+### 📐 Timestep Scheduler
+Control *where* denoising steps are concentrated across the noise schedule with 5 pluggable schedulers: **Linear** (default, uniform spacing), **DDIM Uniform** (concentrates steps where noise changes fastest), **SGM Uniform** (EDM convention), **Bong Tangent** (front-loads structural decisions), and **Linear Quadratic** (more budget for fine detail refinement). Composes naturally with the Shift slider and solver selection.
+
 ### 🎯 Activation Steering (TADA)
 > ⚠️ **Experimental Feature:** Currently in-progress and may not work as intended.
 

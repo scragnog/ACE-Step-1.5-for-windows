@@ -156,6 +156,7 @@ def build_generation_setup(
         cfg_interval_end=req.cfg_interval_end,
         shift=req.shift,
         infer_method=req.infer_method,
+        scheduler=req.scheduler,
         timesteps=parsed_timesteps,
         repainting_start=req.repainting_start,
         repainting_end=req.repainting_end if req.repainting_end else -1,

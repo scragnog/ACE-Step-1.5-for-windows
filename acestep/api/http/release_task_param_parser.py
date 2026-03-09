@@ -32,6 +32,7 @@ PARAM_ALIASES: Dict[str, list[str]] = {
     "src_audio_path": ["src_audio_path", "ctx_audio_path", "sourceAudioPath", "srcAudioPath", "ctxAudioPath"],
     "task_type": ["task_type", "taskType"],
     "infer_method": ["infer_method", "inferMethod"],
+    "scheduler": ["scheduler"],
     "use_tiled_decode": ["use_tiled_decode", "useTiledDecode"],
     "constrained_decoding": ["constrained_decoding", "constrainedDecoding", "constrained"],
     "constrained_decoding_debug": ["constrained_decoding_debug", "constrainedDecodingDebug"],

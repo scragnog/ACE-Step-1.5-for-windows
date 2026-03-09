@@ -132,6 +132,7 @@ class ServiceGenerateExecuteMixin:
         logger.info(
             f"[service_generate] DiT diffusion via {dit_backend}... "
             f"solver={generate_kwargs.get('infer_method', 'ode')}, "
+            f"scheduler={generate_kwargs.get('scheduler', 'linear')}, "
             f"guidance={generate_kwargs.get('guidance_mode', 'apg')}, "
             f"steps={generate_kwargs.get('infer_steps')}, "
             f"cfg_scale={generate_kwargs.get('diffusion_guidance_sale')}, "
