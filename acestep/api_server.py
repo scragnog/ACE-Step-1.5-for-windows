@@ -392,6 +392,7 @@ def create_app() -> FastAPI:
                     "lyrics": data.get("lyrics", ""),
                     "bpm": data.get("bpm", 0),
                     "keyscale": data.get("keyscale", ""),
+                    "duration": data.get("duration", 0),
                     "filename": json_path.name,
                 })
             except Exception as exc:
