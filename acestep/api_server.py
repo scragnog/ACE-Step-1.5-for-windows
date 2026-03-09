@@ -360,6 +360,53 @@ def create_app() -> FastAPI:
         runtime_append_jsonl=_runtime_append_jsonl,
     )
 
+    # ─── Lyrics Library (folder scanner) ──────────────────────────────
+    from fastapi import Query as _Query
+    from pathlib import Path as _Path
+    from collections import defaultdict as _defaultdict
+
+    @app.get("/api/lyrics-library/scan")
+    async def scan_lyrics_library(path: str = _Query(..., description="Directory to scan")):
+        """Recursively scan a folder for .json lyrics files and return grouped by artist/album."""
+        root = _Path(path)
+        if not root.is_dir():
+            return {"artists": [], "error": f"Directory not found: {path}"}
+
+        # artist_name -> album_name -> list of tracks
+        tree: dict[str, dict[str, list]] = _defaultdict(lambda: _defaultdict(list))
+
+        for json_path in root.rglob("*.json"):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                meta = data.get("metadata", {})
+                artist = meta.get("artist", json_path.parent.parent.name or "Unknown Artist")
+                album_folder = json_path.parent.name or "Unknown"
+                # Strip "Based on " prefix for cleaner display
+                album = album_folder.removeprefix("Based on ").strip() if album_folder.startswith("Based on ") else album_folder
+
+                tree[artist][album].append({
+                    "title": data.get("title", json_path.stem),
+                    "caption": data.get("caption", ""),
+                    "lyrics": data.get("lyrics", ""),
+                    "bpm": data.get("bpm", 0),
+                    "keyscale": data.get("keyscale", ""),
+                    "filename": json_path.name,
+                })
+            except Exception as exc:
+                logger.debug(f"Skipping {json_path}: {exc}")
+
+        result = []
+        for artist_name in sorted(tree.keys()):
+            albums = []
+            for album_name in sorted(tree[artist_name].keys()):
+                tracks = sorted(tree[artist_name][album_name], key=lambda t: t["title"])
+                albums.append({"name": album_name, "tracks": tracks})
+            result.append({"name": artist_name, "albums": albums})
+
+        return {"artists": result}
+
     return app
 
 
