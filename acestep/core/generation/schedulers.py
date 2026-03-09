@@ -54,58 +54,55 @@ def linear_schedule(num_steps: int, shift: float = 1.0) -> List[float]:
 
 
 def ddim_uniform_schedule(num_steps: int, shift: float = 1.0) -> List[float]:
-    """DDIM uniform — uniform spacing in σ (sigma) space.
+    """Log-SNR uniform — uniform spacing in logit(t) space.
 
-    Maps to sigma via σ = sqrt((1-α_bar)/α_bar) where α_bar follows a
-    cosine schedule, then distributes steps uniformly in σ-space and
-    maps back to t.  This concentrates steps where the noise level
-    changes most rapidly.
+    In flow matching, SNR = (1-t)²/t², so log-SNR ∝ -logit(t).
+    Uniform spacing in logit(t) concentrates steps where the
+    signal-to-noise ratio changes most in *relative* terms.
+
+    Gives an S-shaped distribution: dense around t=0.5, tapering
+    at both extremes.  Preserves vocal detail budget.
     """
-    # Build a fine-grained cosine alpha_bar schedule
-    N_fine = 1000
-    alphas_bar = [
-        math.cos(((i / N_fine) + 0.008) / 1.008 * math.pi / 2) ** 2
-        for i in range(N_fine + 1)
-    ]
-    sigmas = [math.sqrt((1.0 - ab) / max(ab, 1e-8)) for ab in alphas_bar]
-    sigma_max = sigmas[0]
-    sigma_min = sigmas[-1]
+    # logit bounds: t=0.9986 → logit≈6.57,  t=0.0014 → logit≈-6.57
+    t_max = 0.9986
+    t_min = 0.0014
+    logit_max = math.log(t_max / (1.0 - t_max))
+    logit_min = math.log(t_min / (1.0 - t_min))
 
-    # Uniform steps in sigma space
-    target_sigmas = [
-        sigma_max + (sigma_min - sigma_max) * i / (num_steps)
-        for i in range(num_steps)
-    ]
+    raw = []
+    for i in range(num_steps):
+        frac = i / num_steps
+        logit_t = logit_max + (logit_min - logit_max) * frac
+        t = 1.0 / (1.0 + math.exp(-logit_t))  # sigmoid
+        raw.append(t)
 
-    # Map each target sigma back to t ∈ (0, 1]
-    # t = σ² / (1 + σ²), derived from σ = sqrt((1-t)/t) → t = 1/(1+σ²)
-    # But we want t=1 → noise, t=0 → clean, so t = σ²/(1+σ²)
-    raw = [s * s / (1.0 + s * s) for s in target_sigmas]
-
-    # Ensure descending and clamp
-    raw = sorted(raw, reverse=True)
     raw = [max(min(t, 1.0), 1e-6) for t in raw]
     return _apply_shift(raw, shift)
 
 
 def sgm_uniform_schedule(num_steps: int, shift: float = 1.0) -> List[float]:
-    """SGM uniform — uniform in σ² space (Stability AI / EDM convention).
+    """Karras σ-ramp — uniform in σ^(1/ρ) space (EDM/Karras convention).
 
-    Distributes timesteps uniformly in σ² (variance) rather than σ,
-    giving a subtly different density curve from DDIM uniform.
+    Uses the well-tested Karras noise schedule ramp with ρ=7, adapted
+    for flow matching.  Provides moderate front-loading: more steps in
+    the structural region than linear, but not so extreme that detail
+    is starved.
     """
-    # In flow matching: t corresponds to the noise fraction, σ² ~ t/(1-t)
-    # Uniform in σ² means uniform in t/(1-t), so we solve for t.
-    # Let u = t/(1-t) → t = u/(1+u)
-    # u ranges from large (t≈1) to small (t≈0)
-    u_max = 1.0 / 1e-4 - 1.0  # t ≈ 0.9999
-    u_min = 1e-4 / (1.0 - 1e-4)  # t ≈ 0.0001
+    t_max = 0.999
+    t_min = 0.001
+    sigma_max = t_max / (1.0 - t_max)   # ≈999
+    sigma_min = t_min / (1.0 - t_min)   # ≈0.001
+    rho = 7.0  # Karras ramp parameter
+
+    inv_rho = 1.0 / rho
+    s_max = sigma_max ** inv_rho
+    s_min = sigma_min ** inv_rho
 
     raw = []
     for i in range(num_steps):
         frac = i / num_steps
-        u = u_max + (u_min - u_max) * frac
-        t = u / (1.0 + u)
+        sigma = (s_max + frac * (s_min - s_max)) ** rho
+        t = sigma / (1.0 + sigma)
         raw.append(t)
 
     raw = [max(min(t, 1.0), 1e-6) for t in raw]
@@ -169,6 +166,65 @@ def linear_quadratic_schedule(num_steps: int, shift: float = 1.0) -> List[float]
     return _apply_shift(raw, shift)
 
 
+def composite_schedule(
+    num_steps: int,
+    shift: float = 1.0,
+    scheduler_a: str = "bong_tangent",
+    scheduler_b: str = "linear",
+    crossover: float = 0.5,
+    split: float = 0.5,
+) -> List[float]:
+    """Two-stage composite — different schedulers for structure vs detail.
+
+    Splits the total diffusion trajectory into two phases at a
+    crossover timestep, using ``scheduler_a`` for the high-noise
+    structural phase (t=1 → crossover) and ``scheduler_b`` for
+    the low-noise detail phase (crossover → 0).
+
+    Args:
+        num_steps:   Total number of diffusion steps.
+        shift:       Timestep shift factor (applied after compositing).
+        scheduler_a: Scheduler name for the structural phase (t ≥ crossover).
+        scheduler_b: Scheduler name for the detail phase (t < crossover).
+        crossover:   Timestep value (0–1) where the phases meet. Default 0.5.
+        split:       Fraction of total steps allocated to phase A. Default 0.5.
+    """
+    n_a = max(int(num_steps * split), 1)
+    n_b = max(num_steps - n_a, 1)
+
+    # Generate a full schedule from each scheduler, then filter to the
+    # appropriate range.  We over-sample and pick the right density.
+    fn_a = SCHEDULERS.get(scheduler_a, linear_schedule)
+    fn_b = SCHEDULERS.get(scheduler_b, linear_schedule)
+
+    # Phase A: structural (t=1 → crossover), n_a steps
+    # Generate with shift=1 (we apply shift globally at the end)
+    full_a = fn_a(n_a * 4, shift=1.0)  # oversample for better density
+    phase_a = [t for t in full_a if t >= crossover]
+    # If oversampled, subsample to n_a steps evenly
+    if len(phase_a) > n_a:
+        indices = [int(i * (len(phase_a) - 1) / (n_a - 1)) for i in range(n_a)]
+        phase_a = [phase_a[idx] for idx in indices]
+    elif len(phase_a) < n_a:
+        # Fallback: linearly space between 1.0 and crossover
+        phase_a = [1.0 - i * (1.0 - crossover) / n_a for i in range(n_a)]
+
+    # Phase B: detail (crossover → 0), n_b steps
+    full_b = fn_b(n_b * 4, shift=1.0)  # oversample
+    phase_b = [t for t in full_b if t < crossover]
+    if len(phase_b) > n_b:
+        indices = [int(i * (len(phase_b) - 1) / (n_b - 1)) for i in range(n_b)]
+        phase_b = [phase_b[idx] for idx in indices]
+    elif len(phase_b) < n_b:
+        # Fallback: linearly space between crossover and near-0
+        phase_b = [crossover * (1.0 - (i + 1) / n_b) for i in range(n_b)]
+
+    raw = phase_a + phase_b
+    raw = sorted(raw, reverse=True)
+    raw = [max(min(t, 1.0), 1e-6) for t in raw]
+    return _apply_shift(raw, shift)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -179,21 +235,78 @@ SCHEDULERS = {
     "sgm_uniform": sgm_uniform_schedule,
     "bong_tangent": bong_tangent_schedule,
     "linear_quadratic": linear_quadratic_schedule,
+    "composite": composite_schedule,
 }
 
 SCHEDULER_INFO = {
     "linear":           {"name": "Linear",           "description": "Uniform spacing (default)"},
-    "ddim_uniform":     {"name": "DDIM Uniform",     "description": "Uniform in σ-space"},
-    "sgm_uniform":      {"name": "SGM Uniform",      "description": "Uniform in σ²-space (EDM)"},
+    "ddim_uniform":     {"name": "DDIM Uniform",     "description": "Log-SNR uniform (S-shaped)"},
+    "sgm_uniform":      {"name": "SGM Uniform",      "description": "Karras σ-ramp (ρ=7)"},
     "bong_tangent":     {"name": "Tangent",           "description": "Front-loaded (structural focus)"},
     "linear_quadratic": {"name": "Linear-Quadratic",  "description": "Linear start, quadratic finish"},
+    "composite":        {"name": "Composite",         "description": "Two-stage: different schedulers for structure vs detail"},
 }
 
 VALID_SCHEDULERS = set(SCHEDULERS.keys())
 
 
+def get_schedule(name: str, num_steps: int, shift: float = 1.0) -> List[float]:
+    """Get a timestep schedule by name, supporting composite syntax.
+
+    Simple schedulers::
+
+        get_schedule("linear", 50, 5.0)
+        get_schedule("bong_tangent", 50, 5.0)
+
+    Composite (2-stage) scheduler — encode config in the name string::
+
+        get_schedule("composite:bong_tangent+linear_quadratic:0.5:0.6", 50, 5.0)
+        #            ^type     ^stageA     ^stageB             ^cross ^split
+
+    Format: ``composite:<scheduler_a>+<scheduler_b>:<crossover>:<split>``
+
+    - scheduler_a: structural phase (high noise). Default: bong_tangent
+    - scheduler_b: detail phase (low noise). Default: linear
+    - crossover:   timestep (0–1) separating phases. Default: 0.5
+    - split:       fraction of steps for phase A. Default: 0.5
+
+    Returns:
+        List of float timestep values, descending, in (0, 1].
+    """
+    name = name.lower().strip()
+
+    # ── Composite scheduler parsed from string ───────────────────
+    if name.startswith("composite"):
+        # Parse: "composite:a+b:crossover:split"
+        parts = name.split(":")
+        sched_pair = parts[1] if len(parts) > 1 else "bong_tangent+linear"
+        if "+" in sched_pair:
+            a_name, b_name = sched_pair.split("+", 1)
+        else:
+            a_name, b_name = sched_pair, "linear"
+        crossover = float(parts[2]) if len(parts) > 2 else 0.5
+        split_frac = float(parts[3]) if len(parts) > 3 else 0.5
+        return composite_schedule(
+            num_steps, shift,
+            scheduler_a=a_name.strip(),
+            scheduler_b=b_name.strip(),
+            crossover=crossover,
+            split=split_frac,
+        )
+
+    # ── Simple scheduler ─────────────────────────────────────────
+    if name not in SCHEDULERS:
+        valid = ", ".join(sorted(VALID_SCHEDULERS))
+        raise ValueError(f"Unknown scheduler '{name}'. Valid schedulers: {valid}")
+    return SCHEDULERS[name](num_steps, shift)
+
+
 def get_scheduler(name: str):
-    """Get a scheduler function by name.
+    """Get a scheduler function by name (legacy API).
+
+    For composite schedulers, returns a wrapper that parses the
+    composite string.  For simple schedulers, returns the function
+    directly.
 
     Returns:
         schedule_fn: Callable[[int, float], List[float]]
@@ -201,8 +314,14 @@ def get_scheduler(name: str):
     Raises:
         ValueError if the scheduler name is not recognized.
     """
-    name = name.lower().strip()
-    if name not in SCHEDULERS:
+    clean = name.lower().strip()
+    if clean.startswith("composite"):
+        # Return a closure that delegates to get_schedule
+        def _composite_wrapper(num_steps: int, shift: float = 1.0) -> List[float]:
+            return get_schedule(name, num_steps, shift)
+        return _composite_wrapper
+
+    if clean not in SCHEDULERS:
         valid = ", ".join(sorted(VALID_SCHEDULERS))
-        raise ValueError(f"Unknown scheduler '{name}'. Valid schedulers: {valid}")
-    return SCHEDULERS[name]
+        raise ValueError(f"Unknown scheduler '{clean}'. Valid schedulers: {valid}")
+    return SCHEDULERS[clean]

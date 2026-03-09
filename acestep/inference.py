@@ -134,7 +134,10 @@ class GenerationParams:
     # Custom timesteps (parsed from string like "0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0")
     # If provided, overrides inference_steps and shift
     timesteps: Optional[List[float]] = None
-    scheduler: str = "linear"  # Timestep scheduler: linear, ddim_uniform, sgm_uniform, bong_tangent, linear_quadratic
+    scheduler: str = "linear"  # Timestep scheduler: linear, ddim_uniform, sgm_uniform, bong_tangent, linear_quadratic, composite
+    scheduler_b: str = "linear"  # For composite: detail phase scheduler
+    scheduler_crossover: float = 0.5  # For composite: crossover timestep (0-1)
+    scheduler_split: float = 0.5  # For composite: fraction of steps for structure phase (0-1)
 
     # PAG (Perturbed-Attention Guidance)
     use_pag: bool = False
