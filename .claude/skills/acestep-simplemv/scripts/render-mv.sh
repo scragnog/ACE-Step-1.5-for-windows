@@ -14,6 +14,7 @@
 #   --offset    Lyric timing offset in seconds (default: -0.5)
 #   --output    Output file path (default: acestep_output/<audio_basename>.mp4)
 #   --codec     h264|h265|vp8|vp9 (default: h264)
+#   --background Background image file path (if omitted, uses animated gradient)
 #   --browser   Custom browser executable path (Chrome/Edge/Chromium)
 #
 # Environment variables:
@@ -47,6 +48,7 @@ CREDIT=""
 OFFSET="-0.5"
 OUTPUT=""
 CODEC="h264"
+BACKGROUND=""
 BROWSER=""
 
 # Parse args
@@ -61,6 +63,7 @@ while [[ $# -gt 0 ]]; do
     --offset)      OFFSET="$2"; shift 2 ;;
     --output)      OUTPUT="$2"; shift 2 ;;
     --codec)       CODEC="$2"; shift 2 ;;
+    --background)  BACKGROUND="$2"; shift 2 ;;
     --browser)     BROWSER="$2"; shift 2 ;;
     -h|--help)
       head -20 "$0" | tail -18
@@ -109,6 +112,10 @@ fi
 
 [[ -n "$SUBTITLE" ]] && NODE_ARGS+=(--subtitle "$SUBTITLE")
 [[ -n "$CREDIT" ]] && NODE_ARGS+=(--credit "$CREDIT")
+if [[ -n "$BACKGROUND" ]]; then
+  BACKGROUND="$(resolve_path "$BACKGROUND")"
+  NODE_ARGS+=(--background "$BACKGROUND")
+fi
 [[ -n "$BROWSER" ]] && NODE_ARGS+=(--browser "$BROWSER")
 
 echo "Rendering MV..."

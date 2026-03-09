@@ -2,6 +2,7 @@ import React from 'react';
 import {
   AbsoluteFill,
   Audio,
+  Img,
   useCurrentFrame,
   useVideoConfig,
   interpolate,
@@ -18,6 +19,7 @@ export const AudioVisualization: React.FC<MVInputProps> = ({
   subtitle,
   creditText,
   lyricOffset,
+  backgroundImage,
 }) => {
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
@@ -71,14 +73,43 @@ export const AudioVisualization: React.FC<MVInputProps> = ({
   const avgAmplitude =
     visualization.reduce((sum, val) => sum + val, 0) / visualization.length;
 
+  const bgSrc = backgroundImage
+    ? backgroundImage.startsWith('http')
+      ? backgroundImage
+      : staticFile(backgroundImage)
+    : '';
+
   return (
     <AbsoluteFill>
-      {/* Animated gradient background */}
-      <AbsoluteFill
-        style={{
-          background: `linear-gradient(135deg, hsl(${hue}, 80%, 12%) 0%, hsl(${hue + 80}, 70%, 8%) 100%)`,
-        }}
-      />
+      {/* Background: image or animated gradient */}
+      {bgSrc ? (
+        <>
+          <AbsoluteFill>
+            <Img
+              src={bgSrc}
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+              }}
+            />
+          </AbsoluteFill>
+          {/* Dark overlay for readability */}
+          <AbsoluteFill
+            style={{
+              background: `rgba(0, 0, 0, 0.45)`,
+            }}
+          />
+        </>
+      ) : (
+        <>
+          <AbsoluteFill
+            style={{
+              background: `linear-gradient(135deg, hsl(${hue}, 80%, 12%) 0%, hsl(${hue + 80}, 70%, 8%) 100%)`,
+            }}
+          />
+        </>
+      )}
 
       {/* Radial glow effect */}
       <AbsoluteFill

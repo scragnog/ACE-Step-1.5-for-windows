@@ -38,6 +38,16 @@ If the user needs a simple music video, use the **acestep-simplemv** skill to re
 - **acestep-songwriting** — for writing lyrics and planning song structure
 - **acestep-lyrics-transcription** — for transcribing audio to timestamped lyrics (LRC)
 - **acestep-simplemv** — for rendering the final music video
+- **acestep-thumbnail** (optional) — for generating cover art / MV background images via Gemini API
+
+**MV Background Image**: When the user requests MV production, ask whether they want a background image for the video:
+1. **Generate via Gemini** — use the **acestep-thumbnail** skill (requires Gemini API key configuration)
+2. **Provide an existing image** — user supplies a local image path
+3. **Skip** — use the default animated gradient background (no image needed)
+
+Use `AskUserQuestion` to let the user choose before proceeding with MV rendering.
+
+**Parallel Processing**: Lyrics transcription and thumbnail generation are independent tasks. When the user chooses to generate a background image, run **acestep-lyrics-transcription** and **acestep-thumbnail** in parallel (e.g. via two concurrent Agent calls) to save time, then use both outputs for the final MV render.
 
 ## Script Commands
 
