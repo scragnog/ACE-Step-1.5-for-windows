@@ -1,0 +1,10 @@
+{
+  "concept": "angry_vocals",
+  "num_steps": 30,
+  "num_samples": 8,
+  "seed": 42,
+  "elapsed_seconds": 42.0,
+  "positive_template": "{p} with angry vocals",
+  "negative_template": "{p}",
+  "num_step_keys": 30
+}

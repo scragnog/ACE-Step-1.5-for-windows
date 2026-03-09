@@ -87,6 +87,7 @@ def register_generation_run_handlers(context: GenerationWiringContext) -> None:
             generation_section["shift"],
             generation_section["infer_method"],
             generation_section["custom_timesteps"],
+            generation_section["scheduler"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["think_checkbox"],

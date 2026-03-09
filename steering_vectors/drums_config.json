@@ -1,0 +1,10 @@
+{
+  "concept": "drums",
+  "num_steps": 30,
+  "num_samples": 8,
+  "seed": 42,
+  "elapsed_seconds": 51.1,
+  "positive_template": "{p} with drums",
+  "negative_template": "{p}",
+  "num_step_keys": 30
+}

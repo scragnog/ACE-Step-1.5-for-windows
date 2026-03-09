@@ -29,6 +29,7 @@ class GenerateMusicExecuteMixin:
         pag_start: float = 0.30,
         pag_end: float = 0.80,
         pag_scale: float = 0.2,
+        scheduler: str = "linear",
     ) -> Dict[str, Any]:
         """Invoke ``service_generate`` while maintaining background progress estimation."""
         infer_steps_for_progress = len(timesteps) if timesteps else inference_steps
@@ -74,6 +75,7 @@ class GenerateMusicExecuteMixin:
                 pag_start=pag_start,
                 pag_end=pag_end,
                 pag_scale=pag_scale,
+                scheduler=scheduler,
             )
         finally:
             if stop_event is not None:

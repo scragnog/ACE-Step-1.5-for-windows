@@ -31,6 +31,7 @@ def _build_saved_params(
     score_scale, lm_batch_chunk_size,
     track_name, complete_track_classes,
     enable_normalization, normalization_db, latent_shift, latent_rescale,
+    scheduler="linear",
 ):
     """Build the parameter snapshot dict stored in batch history."""
     return {
@@ -50,6 +51,7 @@ def _build_saved_params(
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
         "shift": shift, "infer_method": infer_method,
+        "scheduler": scheduler,
         "audio_format": audio_format, "lm_temperature": lm_temperature,
         "think_checkbox": think_checkbox, "lm_cfg_scale": lm_cfg_scale,
         "lm_top_k": lm_top_k, "lm_top_p": lm_top_p,
@@ -100,6 +102,7 @@ def _apply_param_defaults(params):
         "task_type": "text2music", "use_adg": False,
         "cfg_interval_start": 0.0, "cfg_interval_end": 1.0,
         "shift": 1.0, "infer_method": "ode", "custom_timesteps": "",
+        "scheduler": "linear",
         "audio_format": "flac", "lm_temperature": 0.85,
         "think_checkbox": True, "lm_cfg_scale": 2.0,
         "lm_top_k": 0, "lm_top_p": 0.9,

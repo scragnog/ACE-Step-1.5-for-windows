@@ -35,6 +35,7 @@ def get_timestep_schedule(
     shift: float = 3.0,
     timesteps: Optional[list] = None,
     infer_steps: Optional[int] = None,
+    scheduler: str = "linear",
 ) -> List[float]:
     """Compute the timestep schedule for diffusion sampling.
 
@@ -68,10 +69,9 @@ def get_timestep_schedule(
             t_schedule_list = mapped
 
     if t_schedule_list is None and infer_steps is not None and infer_steps > 0:
-        raw = [1.0 - i / infer_steps for i in range(infer_steps)]
-        if shift != 1.0:
-            raw = [shift * t / (1.0 + (shift - 1.0) * t) for t in raw]
-        t_schedule_list = raw
+        from acestep.core.generation.schedulers import get_scheduler
+        schedule_fn = get_scheduler(scheduler)
+        t_schedule_list = schedule_fn(infer_steps, shift)
 
     if t_schedule_list is None:
         original_shift = shift
@@ -135,6 +135,7 @@ def mlx_generate_diffusion(
     context_latents_non_cover_np: Optional[np.ndarray] = None,
     compile_model: bool = False,
     disable_tqdm: bool = False,
+    scheduler: str = "linear",
 ) -> Dict[str, object]:
     """Run the complete MLX diffusion loop with optional CFG guidance.
 
@@ -212,7 +213,7 @@ def mlx_generate_diffusion(
         noise = mx.random.normal((bsz, T, C), key=key)
 
     # ---- Timestep schedule ----
-    t_schedule_list = get_timestep_schedule(shift, timesteps, infer_steps=infer_steps)
+    t_schedule_list = get_timestep_schedule(shift, timesteps, infer_steps=infer_steps, scheduler=scheduler)
     num_steps = len(t_schedule_list)
 
     cover_steps = int(num_steps * audio_cover_strength)

@@ -35,6 +35,7 @@ class DiffusionMixin:
         encoder_attention_mask_non_cover=None,
         context_latents_non_cover=None,
         disable_tqdm: bool = False,
+        scheduler: str = "linear",
     ) -> Dict[str, Any]:
         """Run the MLX diffusion loop and return generated latents.
 
@@ -139,6 +140,7 @@ class DiffusionMixin:
             context_latents_non_cover_np=ctx_nc_np,
             compile_model=getattr(self, "mlx_dit_compiled", False),
             disable_tqdm=disable_tqdm,
+            scheduler=scheduler,
         )
 
         target_np = result["target_latents"]

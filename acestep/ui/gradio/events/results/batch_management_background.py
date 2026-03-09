@@ -84,6 +84,7 @@ def generate_next_batch_background(
             shift=params.get("shift"),
             infer_method=params.get("infer_method"),
             custom_timesteps=params.get("custom_timesteps"),
+            scheduler=params.get("scheduler", "linear"),
             audio_format=params.get("audio_format"),
             lm_temperature=params.get("lm_temperature"),
             think_checkbox=params.get("think_checkbox"),

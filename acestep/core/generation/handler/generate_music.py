@@ -135,6 +135,7 @@ class GenerateMusicMixin:
         steering_enabled: Optional[bool] = None,
         steering_loaded: Optional[List[str]] = None,
         steering_alphas: Optional[Dict[str, float]] = None,
+        scheduler: str = "linear",
         progress=None,
     ) -> Dict[str, Any]:
         """Generate audio from text/reference inputs and return response payload.
@@ -266,6 +267,7 @@ class GenerateMusicMixin:
                 pag_start=pag_start,
                 pag_end=pag_end,
                 pag_scale=pag_scale,
+                scheduler=scheduler,
             )
             outputs = service_run["outputs"]
             infer_steps_for_progress = service_run["infer_steps_for_progress"]

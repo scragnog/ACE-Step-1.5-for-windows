@@ -240,6 +240,7 @@ issues/
 PortableGit/
 proxy_config.txt
 gradio_outputs/
+stems_output/
 huggingface/
 .windsurf/
 acestep/third_parts/vllm/

@@ -77,6 +77,7 @@ class ServiceGenerateExecuteMixin:
         pag_start: float = 0.30,
         pag_end: float = 0.80,
         pag_scale: float = 0.2,
+        scheduler: str = "linear",
     ) -> Dict[str, Any]:
         """Build kwargs passed to model generation backends."""
         kwargs = {
@@ -108,6 +109,7 @@ class ServiceGenerateExecuteMixin:
             "pag_start": pag_start,
             "pag_end": pag_end,
             "pag_scale": pag_scale,
+            "scheduler": scheduler,
         }
         if timesteps is not None:
             kwargs["timesteps"] = torch.tensor(timesteps, dtype=torch.float32, device=self.device)
@@ -206,6 +208,7 @@ class ServiceGenerateExecuteMixin:
                             encoder_hidden_states_non_cover=enc_hs_nc,
                             encoder_attention_mask_non_cover=enc_am_nc,
                             context_latents_non_cover=ctx_nc,
+                            scheduler=generate_kwargs.get("scheduler", "linear"),
                         )
                         _tc = outputs.get("time_costs", {})
                         logger.info(

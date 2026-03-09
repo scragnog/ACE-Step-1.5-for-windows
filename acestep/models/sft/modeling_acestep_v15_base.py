@@ -1810,6 +1810,7 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         shift: float = 1.0,
         timesteps: Optional[torch.Tensor] = None,
         cover_noise_strength: float = 0.0,
+        scheduler: str = "linear",
         **kwargs,
     ):
         if attention_mask is None:
@@ -1867,10 +1868,11 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
             t = timesteps.to(device=device, dtype=dtype)
             infer_steps = len(t) - 1
         else:
-            t = torch.linspace(1.0, 0.0, infer_steps + 1, device=device, dtype=dtype)
-            # Apply shift transformation to timesteps if shift != 1.0
-            if shift != 1.0:
-                t = shift * t / (1 + (shift - 1) * t)
+            # Build timestep schedule using the scheduler registry
+            from acestep.core.generation.schedulers import get_scheduler
+            schedule_fn = get_scheduler(scheduler)
+            t_values = schedule_fn(infer_steps, shift)
+            t = torch.tensor(t_values + [0.0], device=device, dtype=dtype)
         
         cover_steps = int(infer_steps * audio_cover_strength)
         if use_progress_bar:

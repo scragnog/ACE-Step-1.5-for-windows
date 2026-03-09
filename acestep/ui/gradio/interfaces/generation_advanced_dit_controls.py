@@ -47,6 +47,13 @@ def build_dit_controls(ui_config: dict[str, Any]) -> dict[str, Any]:
                 info=t("generation.infer_method_info"),
                 elem_classes=["has-info-container"],
             )
+            scheduler = gr.Dropdown(
+                choices=["linear", "ddim_uniform", "sgm_uniform", "bong_tangent", "linear_quadratic"],
+                value="linear",
+                label=t("generation.scheduler_label"),
+                info=t("generation.scheduler_info"),
+                elem_classes=["has-info-container"],
+            )
         with gr.Row():
             use_adg = gr.Checkbox(
                 label=t("generation.use_adg_label"),
@@ -108,6 +115,7 @@ def build_dit_controls(ui_config: dict[str, Any]) -> dict[str, Any]:
         "inference_steps": inference_steps,
         "guidance_scale": guidance_scale,
         "infer_method": infer_method,
+        "scheduler": scheduler,
         "use_adg": use_adg,
         "shift": shift,
         "custom_timesteps": custom_timesteps,

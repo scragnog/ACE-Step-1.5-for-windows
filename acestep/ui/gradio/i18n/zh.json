@@ -5,8 +5,8 @@
   },
   "common": {
     "language_metadata": {
-    "name": "Chinese",
-    "native_name": "中文"
+      "name": "Chinese",
+      "native_name": "中文"
     }
   },
   "dataset": {
@@ -165,6 +165,8 @@
     "shift_info": "时间步偏移因子，仅对 base 模型生效 (范围 1.0~5.0，默认 3.0)。对 turbo 模型无效。",
     "infer_method_label": "推理方法",
     "infer_method_info": "扩散推理方法。ODE (欧拉) 更快，SDE (随机) 可能产生不同结果。",
+    "scheduler_label": "时间步调度器",
+    "scheduler_info": "扩散时间步的分布方式。'linear' 为默认值。其他调度器将步数集中在不同的噪声区域。",
     "custom_timesteps_label": "自定义时间步",
     "custom_timesteps_info": "从 1.0 到 0.0 的逗号分隔值（例如 '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0'）。会覆盖推理步数和 shift 设置。",
     "cfg_interval_start": "CFG 间隔开始",

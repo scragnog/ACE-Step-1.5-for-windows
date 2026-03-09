@@ -134,6 +134,7 @@ class GenerationParams:
     # Custom timesteps (parsed from string like "0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0")
     # If provided, overrides inference_steps and shift
     timesteps: Optional[List[float]] = None
+    scheduler: str = "linear"  # Timestep scheduler: linear, ddim_uniform, sgm_uniform, bong_tangent, linear_quadratic
 
     # PAG (Perturbed-Attention Guidance)
     use_pag: bool = False
@@ -646,6 +647,7 @@ def generate_music(
             steering_enabled=params.steering_enabled,
             steering_loaded=params.steering_loaded,
             steering_alphas=params.steering_alphas,
+            scheduler=params.scheduler,
             progress=progress,
         )
 

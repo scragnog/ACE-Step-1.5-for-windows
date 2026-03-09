@@ -1,0 +1,10 @@
+{
+  "concept": "double_kick_drums",
+  "num_steps": 30,
+  "num_samples": 8,
+  "seed": 42,
+  "elapsed_seconds": 43.2,
+  "positive_template": "{p} with double kick drums",
+  "negative_template": "{p}",
+  "num_step_keys": 30
+}

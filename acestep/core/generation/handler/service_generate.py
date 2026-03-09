@@ -49,6 +49,7 @@ class ServiceGenerateMixin:
         pag_start: float = 0.30,
         pag_end: float = 0.80,
         pag_scale: float = 0.2,
+        scheduler: str = "linear",
     ) -> Dict[str, Any]:
         """Generate music latents and metadata from text/audio conditioning inputs.
 
@@ -76,6 +77,7 @@ class ServiceGenerateMixin:
             audio_code_hints: Optional serialized audio-code hints.
             infer_method: Diffusion inference method selector.
             timesteps: Optional explicit diffusion timestep sequence.
+            scheduler: Timestep scheduler name (e.g. "linear", "ddim_uniform").
 
         Returns:
             Dict[str, Any]: Service output payload containing generated latents,
@@ -134,6 +136,7 @@ class ServiceGenerateMixin:
             pag_start=pag_start,
             pag_end=pag_end,
             pag_scale=pag_scale,
+            scheduler=scheduler,
         )
         try:
             if getattr(self, "steering_enabled", False):

@@ -1,0 +1,10 @@
+{
+  "concept": "backing_vocals",
+  "num_steps": 30,
+  "num_samples": 8,
+  "seed": 42,
+  "elapsed_seconds": 41.5,
+  "positive_template": "{p} with backing vocals",
+  "negative_template": "{p}",
+  "num_step_keys": 30
+}

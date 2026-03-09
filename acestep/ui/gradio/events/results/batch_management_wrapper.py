@@ -29,7 +29,7 @@ def generate_with_batch_management(
     text2music_audio_code_string, repainting_start, repainting_end,
     instruction_display_gen, audio_cover_strength, cover_noise_strength, task_type,
     use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method,
-    custom_timesteps, audio_format, lm_temperature,
+    custom_timesteps, scheduler, audio_format, lm_temperature,
     think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
     use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
     constrained_decoding_debug,
@@ -64,7 +64,7 @@ def generate_with_batch_management(
         text2music_audio_code_string, repainting_start, repainting_end,
         instruction_display_gen, audio_cover_strength, cover_noise_strength, task_type,
         use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method,
-        custom_timesteps, audio_format, lm_temperature,
+        custom_timesteps, scheduler, audio_format, lm_temperature,
         think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
         use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
         constrained_decoding_debug,
@@ -129,6 +129,7 @@ def generate_with_batch_management(
         score_scale, lm_batch_chunk_size,
         track_name, complete_track_classes,
         enable_normalization, normalization_db, latent_shift, latent_rescale,
+        scheduler=scheduler,
     )
 
     next_params = saved_params.copy()

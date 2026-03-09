@@ -5,8 +5,8 @@
   },
   "common": {
     "language_metadata": {
-    "name": "English",
-    "native_name": "English"
+      "name": "English",
+      "native_name": "English"
     }
   },
   "dataset": {
@@ -165,6 +165,8 @@
     "shift_info": "Timestep shift factor for base models (range 1.0~5.0, default 3.0). Not effective for turbo models.",
     "infer_method_label": "Inference Method",
     "infer_method_info": "Diffusion inference method. ODE (Euler) is faster, SDE (stochastic) may produce different results.",
+    "scheduler_label": "Timestep Scheduler",
+    "scheduler_info": "How diffusion timesteps are distributed. 'linear' is the default. Other schedules concentrate steps in different noise regions.",
     "custom_timesteps_label": "Custom Timesteps",
     "custom_timesteps_info": "Comma-separated values from 1.0 to 0.0 (e.g., '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0'). Overrides inference steps and shift.",
     "cfg_interval_start": "CFG Interval Start",

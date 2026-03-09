@@ -1,0 +1,10 @@
+{
+  "concept": "clean_guitar",
+  "num_steps": 30,
+  "num_samples": 8,
+  "seed": 42,
+  "elapsed_seconds": 41.7,
+  "positive_template": "{p} with clean guitar",
+  "negative_template": "{p}",
+  "num_step_keys": 30
+}
