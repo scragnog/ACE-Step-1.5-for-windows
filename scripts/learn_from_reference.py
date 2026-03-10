@@ -495,7 +495,16 @@ def generate_profile(
 # ---------------------------------------------------------------------------
 
 def apply_profile(audio_path: str, profile: Dict, output_path: str):
-    """Apply a learned DSP profile to an audio file using pedalboard."""
+    """Apply a learned DSP profile to an audio file using pedalboard.
+
+    Gain staging order (matches how Ozone works internally):
+      1. EQ shape (relative boosts/cuts only)
+      2. Light saturation (exciter warmth)
+      3. Stereo widening (imager)
+      4. Compression (dynamics taming)
+      5. Peak-normalize to -1dB headroom
+      6. Limiter at -0.3dB (Maximizer — achieves loudness safely)
+    """
     print(f"\n--- Applying Profile to {Path(audio_path).name} ---")
 
     data, sr = sf.read(audio_path, dtype="float32")
@@ -505,79 +514,87 @@ def apply_profile(audio_path: str, profile: Dict, output_path: str):
         data = data.T
     print(f"  Input: {data.shape}, {sr}Hz")
 
-    # Build pedalboard from EQ bands
-    plugins = []
+    result = data.copy()
+
+    # --- Step 1: EQ shape (relative boosts/cuts, NOT overall gain) ---
+    eq_plugins = []
     for band in profile["eq_bands"]:
         if band["type"] == "low_shelf":
-            plugins.append(LowShelfFilter(
+            eq_plugins.append(LowShelfFilter(
                 cutoff_frequency_hz=band["freq_hz"],
                 gain_db=band["gain_db"],
                 q=band.get("q", 0.7),
             ))
         elif band["type"] == "high_shelf":
-            plugins.append(HighShelfFilter(
+            eq_plugins.append(HighShelfFilter(
                 cutoff_frequency_hz=band["freq_hz"],
                 gain_db=band["gain_db"],
                 q=band.get("q", 0.7),
             ))
         else:  # peak
-            plugins.append(PeakFilter(
+            eq_plugins.append(PeakFilter(
                 cutoff_frequency_hz=band["freq_hz"],
                 gain_db=band["gain_db"],
                 q=band.get("q", 1.0),
             ))
 
-    # Add compression if ratio > 1.2
-    dyn = profile.get("dynamics", {})
-    if dyn.get("estimated_ratio", 1.0) > 1.2:
-        plugins.append(Compressor(
-            threshold_db=dyn.get("estimated_threshold_db", -12),
-            ratio=dyn["estimated_ratio"],
-            attack_ms=10.0,
-            release_ms=100.0,
-        ))
+    if eq_plugins:
+        eq_board = Pedalboard(eq_plugins)
+        print(f"  Step 1: EQ ({len(eq_plugins)} bands)")
+        for p in eq_plugins:
+            print(f"    {p}")
+        for ch in range(result.shape[0]):
+            result[ch] = eq_board.process(result[ch], sample_rate=sr)
 
-    # Add overall gain (Maximizer loudness, separate from EQ)
-    overall_gain = profile.get("overall_gain_db", 0.0)
-    eq_gain = dyn.get("gain_change_db", 0.0)
-    # Use the smaller of the two to avoid over-boosting
-    gain_db = min(overall_gain, eq_gain) if eq_gain > 0 else overall_gain
-    if abs(gain_db) > 0.2:
-        plugins.append(Gain(gain_db=gain_db))
-
-    # Final limiter (essential — Ozone's Maximizer is fundamentally a limiter)
-    plugins.append(Limiter(threshold_db=-0.3, release_ms=50.0))
-
-    board = Pedalboard(plugins)
-    print(f"  Pedalboard chain: {len(plugins)} plugins")
-    for p in plugins:
-        print(f"    {p}")
-
-    # Process
-    result = data.copy()
-    for ch in range(result.shape[0]):
-        result[ch] = board.process(result[ch], sample_rate=sr)
-
-    # Apply saturation if exciter detected
+    # --- Step 2: Light saturation (exciter) ---
     exc = profile.get("exciter", {})
     drive = exc.get("estimated_drive", 1.0)
+    # Cap drive at 1.5 — the detected 2.45 is inflated by EQ changes in
+    # the high end, not actual distortion
+    drive = min(drive, 1.5)
     if drive > 1.05:
-        print(f"  Applying saturation (drive={drive:.2f})...")
+        print(f"  Step 2: Saturation (drive={drive:.2f})")
         result = np.tanh(result * drive) / np.tanh(drive)
 
-    # Apply stereo widening if detected
+    # --- Step 3: Stereo widening (imager) ---
     st = profile.get("stereo", {})
     width_change = st.get("width_change", 0.0)
     if width_change > 0.05 and result.shape[0] >= 2:
-        print(f"  Applying stereo widening ({width_change:.1%})...")
+        print(f"  Step 3: Stereo widening ({width_change:.1%})")
         mid = (result[0] + result[1]) * 0.5
         side = (result[0] - result[1]) * 0.5
         side *= (1.0 + width_change)
         result[0] = mid + side
         result[1] = mid - side
 
-    # Clip
-    result = np.clip(result, -1.0, 1.0)
+    # --- Step 4: Compression ---
+    dyn = profile.get("dynamics", {})
+    if dyn.get("estimated_ratio", 1.0) > 1.2:
+        comp = Pedalboard([Compressor(
+            threshold_db=dyn.get("estimated_threshold_db", -12),
+            ratio=dyn["estimated_ratio"],
+            attack_ms=10.0,
+            release_ms=100.0,
+        )])
+        print(f"  Step 4: Compression (ratio={dyn['estimated_ratio']:.1f}, "
+              f"threshold={dyn['estimated_threshold_db']:.0f}dB)")
+        for ch in range(result.shape[0]):
+            result[ch] = comp.process(result[ch], sample_rate=sr)
+
+    # --- Step 5: Peak-normalize to -1dB headroom ---
+    peak = np.max(np.abs(result))
+    if peak > 0.001:
+        target_peak = 10 ** (-1.0 / 20)  # -1 dBFS
+        result *= target_peak / peak
+        print(f"  Step 5: Normalized (peak was {20*np.log10(peak):+.1f}dBFS → -1.0dBFS)")
+
+    # --- Step 6: Limiter (Maximizer) ---
+    # Ozone's Maximizer is a look-ahead limiter that achieves loudness.
+    # We use pedalboard's Limiter at -0.3dBFS as a safety ceiling.
+    limiter = Pedalboard([Limiter(threshold_db=-0.3, release_ms=50.0)])
+    print(f"  Step 6: Limiter (-0.3dBFS)")
+    for ch in range(result.shape[0]):
+        result[ch] = limiter.process(result[ch], sample_rate=sr)
 
     print(f"  Saving to: {output_path}")
     sf.write(output_path, result.T, sr, subtype="FLOAT")
