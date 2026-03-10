@@ -116,6 +116,7 @@ class GenerationParams:
     # Audio Post-Processing
     enable_normalization: bool = True
     normalization_db: float = -1.0
+    auto_master: bool = True  # Apply learned mastering profile after generation
 
     # Latent Post-Processing (before VAE decode)
     latent_shift: float = 0.0       # Additive shift on DiT latents. Default 0 = no shift.
@@ -728,12 +729,28 @@ def generate_music(
                      
                      peak_after = torch.max(torch.abs(audio_tensor)).item()
                      logger.info(f"[Normalization] Audio {idx} AFTER: Peak={peak_after:.4f}")
-                     
-                     # Update the tensor in the dict so downstream uses the normalized version ??
-                     # Actually we use audio_tensor variable below, so it's fine.
                  except Exception as e:
                      logger.error(f"Normalization failed: {e}")
             # -------------------------------
+
+            # --- AUTO-MASTERING (learned Ozone profile) ---
+            if params.auto_master:
+                try:
+                    if not hasattr(generate_music, '_mastering_engine'):
+                        from acestep.core.audio.mastering import MasteringEngine
+                        generate_music._mastering_engine = MasteringEngine()
+                        logger.info("[AutoMaster] Mastering engine loaded")
+
+                    engine = generate_music._mastering_engine
+                    # Convert torch [channels, samples] → numpy [channels, samples]
+                    audio_np = audio_tensor.cpu().numpy().astype("float32")
+                    audio_np = engine.master(audio_np, sample_rate)
+                    audio_tensor = torch.from_numpy(audio_np)
+                    logger.info(f"[AutoMaster] Audio {idx} mastered (peak={torch.max(torch.abs(audio_tensor)).item():.4f})")
+                except Exception as e:
+                    logger.warning(f"[AutoMaster] Mastering failed for audio {idx}, using unmastered: {e}")
+            # -----------------------------------------------
+
 
             # Generate UUID for this audio (moved from handler)
             batch_seed = seed_list[idx] if idx < len(seed_list) else seed_list[0] if seed_list else -1

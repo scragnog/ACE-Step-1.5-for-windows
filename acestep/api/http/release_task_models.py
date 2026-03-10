@@ -61,6 +61,7 @@ class GenerateMusicRequest(BaseModel):
     pitch_shift: int = Field(default=0, description="Pitch shift in semitones (-12 to +12)")
     enable_normalization: bool = Field(default=True, description="Enable loudness normalization")
     normalization_db: float = Field(default=-1.0, description="Target normalization loudness in dB")
+    auto_master: bool = Field(default=True, description="Apply mastering profile to output audio")
     latent_shift: float = Field(default=0.0, description="Latent space shift factor")
     latent_rescale: float = Field(default=1.0, description="Latent space rescale factor")
 
