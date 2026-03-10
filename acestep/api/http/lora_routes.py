@@ -222,6 +222,8 @@ def register_lora_routes(
             "use_lora": bool(status.get("active", getattr(handler, "use_lora", False))),
             "lora_scale": float(status.get("scale", getattr(handler, "lora_scale", 1.0))),
             "adapter_type": getattr(handler, "_adapter_type", None),
+            "trigger_word": getattr(handler, "_adapter_trigger_word", ""),
+            "tag_position": getattr(handler, "_adapter_tag_position", ""),
             "scales": status.get("scales", {}),
             "active_adapter": status.get("active_adapter"),
             "adapters": status.get("adapters", []),

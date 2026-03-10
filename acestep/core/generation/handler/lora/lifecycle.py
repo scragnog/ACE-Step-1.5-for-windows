@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
 from loguru import logger
 
@@ -55,6 +55,42 @@ def _resolve_lokr_weights_path(adapter_path: str) -> str | None:
             if _is_lokr_safetensors(candidate):
                 return candidate
     return None
+
+
+def _read_trigger_word_from_safetensors(
+    weights_path: str,
+) -> Tuple[str, str]:
+    """Extract trigger_word and tag_position from safetensors __metadata__.
+
+    Returns:
+        Tuple of (trigger_word, tag_position) — both empty strings if absent.
+    """
+    try:
+        from safetensors import safe_open
+    except ImportError:
+        return ("", "")
+
+    try:
+        with safe_open(weights_path, framework="pt", device="cpu") as sf:
+            metadata: dict[str, Any] = sf.metadata() or {}
+    except Exception:
+        return ("", "")
+
+    raw_config = metadata.get("lokr_config", "")
+    if not isinstance(raw_config, str) or not raw_config.strip():
+        return ("", "")
+
+    try:
+        parsed = json.loads(raw_config)
+    except (json.JSONDecodeError, TypeError):
+        return ("", "")
+
+    if not isinstance(parsed, dict):
+        return ("", "")
+
+    trigger_word = parsed.get("trigger_word", "")
+    tag_position = parsed.get("tag_position", "")
+    return (trigger_word or "", tag_position or "")
 
 
 def _load_lokr_config(weights_path: str) -> LoKRConfig:
@@ -320,6 +356,15 @@ def add_lora(self, lora_path: str, adapter_name: str | None = None) -> str:
                     logger.error(f"LoKr adapter loaded 0 modules from {lokr_weights_path}")
                 self.model.decoder = decoder
                 self._adapter_type = "lokr"
+                # Extract trigger word metadata from safetensors header
+                tw, tp = _read_trigger_word_from_safetensors(lokr_weights_path)
+                if tw:
+                    self._adapter_trigger_word = tw
+                    self._adapter_tag_position = tp or "prepend"
+                    logger.info(f"Adapter trigger word: '{tw}' (position: {tp or 'prepend'})")
+                else:
+                    self._adapter_trigger_word = ""
+                    self._adapter_tag_position = ""
             else:
                 logger.info(f"Loading LoRA adapter from {lora_path} as '{effective_name}'")
                 self.model.decoder = PeftModel.from_pretrained(
@@ -543,6 +588,8 @@ def unload_lora(self) -> str:
         self.use_lora = False
         self._adapter_type = None
         self.lora_scale = 1.0
+        self._adapter_trigger_word = ""
+        self._adapter_tag_position = ""
         _active_loras = getattr(self, "_active_loras", None)
         if _active_loras is not None:
             _active_loras.clear()
