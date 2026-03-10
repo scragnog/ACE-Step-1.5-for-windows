@@ -581,20 +581,28 @@ def apply_profile(audio_path: str, profile: Dict, output_path: str):
         for ch in range(result.shape[0]):
             result[ch] = comp.process(result[ch], sample_rate=sr)
 
-    # --- Step 5: Peak-normalize to -1dB headroom ---
-    peak = np.max(np.abs(result))
-    if peak > 0.001:
-        target_peak = 10 ** (-1.0 / 20)  # -1 dBFS
-        result *= target_peak / peak
-        print(f"  Step 5: Normalized (peak was {20*np.log10(peak):+.1f}dBFS → -1.0dBFS)")
+    # --- Step 5: Loudness push + Limiter (Maximizer) ---
+    # Push gain into the limiter to raise average loudness (like Ozone's
+    # Maximizer). The limiter catches peaks, the gain raises the floor.
+    overall_gain = profile.get("overall_gain_db", 0.0)
+    push_db = min(overall_gain * 0.5, 6.0)  # conservative: half the detected gain, max 6dB
+    if push_db > 0.5:
+        gain_push = Pedalboard([Gain(gain_db=push_db)])
+        for ch in range(result.shape[0]):
+            result[ch] = gain_push.process(result[ch], sample_rate=sr)
+        print(f"  Step 5a: Gain push (+{push_db:.1f}dB)")
 
-    # --- Step 6: Limiter (Maximizer) ---
-    # Ozone's Maximizer is a look-ahead limiter that achieves loudness.
-    # We use pedalboard's Limiter at -0.3dBFS as a safety ceiling.
-    limiter = Pedalboard([Limiter(threshold_db=-0.3, release_ms=50.0)])
-    print(f"  Step 6: Limiter (-0.3dBFS)")
+    limiter = Pedalboard([Limiter(threshold_db=-0.5, release_ms=50.0)])
     for ch in range(result.shape[0]):
         result[ch] = limiter.process(result[ch], sample_rate=sr)
+    print(f"  Step 5b: Limiter (-0.5dBFS)")
+
+    # --- Step 6: Final peak-normalize to -0.1dBFS (max loudness, no clipping) ---
+    peak = np.max(np.abs(result))
+    if peak > 0.001:
+        target_peak = 10 ** (-0.1 / 20)  # -0.1 dBFS
+        result *= target_peak / peak
+        print(f"  Step 6: Peak-normalized to -0.1dBFS (was {20*np.log10(peak):+.1f}dBFS)")
 
     print(f"  Saving to: {output_path}")
     sf.write(output_path, result.T, sr, subtype="FLOAT")
