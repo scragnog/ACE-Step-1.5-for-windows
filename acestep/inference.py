@@ -620,8 +620,12 @@ def generate_music(
             vocal_language=dit_input_vocal_language,
             inference_steps=params.inference_steps,
             guidance_scale=params.guidance_scale,
-            use_random_seed=config.use_random_seed,
-            seed=seed_for_generation,  # Use config.seed (or params.seed fallback) instead of params.seed directly
+            # Use the pre-prepared seeds (same ones used by LM) with use_random_seed=False
+            # to ensure DiT uses the exact same seeds as the LM chunk. Previously,
+            # generate_music() re-randomized seeds internally, causing seed divergence
+            # between LM and DiT — breaking upscale-to-HQ reproducibility.
+            use_random_seed=False,
+            seed=",".join(str(s) for s in actual_seed_list),
             reference_audio=params.reference_audio,
             audio_duration=audio_duration,
             batch_size=config.batch_size if config.batch_size is not None else 1,
