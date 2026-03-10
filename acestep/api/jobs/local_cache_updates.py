@@ -72,6 +72,7 @@ def update_local_cache(
             lm_model = result.get("lm_model", "")
             dit_model = result.get("dit_model", "")
 
+            response_audio_codes = result.get("audio_codes") or []
             if audio_paths:
                 result_data = [
                     {
@@ -89,8 +90,9 @@ def update_local_cache(
                         "dit_model": dit_model,
                         "progress": 1.0,
                         "stage": "succeeded",
+                        **(({"audio_codes": response_audio_codes[i]}) if i < len(response_audio_codes) else {}),
                     }
-                    for path in audio_paths
+                    for i, path in enumerate(audio_paths)
                 ]
             else:
                 result_data = [{

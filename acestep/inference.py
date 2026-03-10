@@ -378,6 +378,9 @@ def generate_music(
         # If user has provided audio_codes, we don't need to generate them
         # Otherwise, check if we need audio codes (lm_dit mode) or just metas (dit mode)
         user_provided_audio_codes = bool(params.audio_codes and str(params.audio_codes).strip())
+        logger.info(f"[generate_music] audio_codes provided: {user_provided_audio_codes} "
+                    f"(len={len(str(params.audio_codes)) if params.audio_codes else 0}, "
+                    f"preview='{str(params.audio_codes)[:80] if params.audio_codes else 'EMPTY'}')")
 
         # Determine infer_type: use "llm_dit" if we need audio codes, "dit" if only metas needed
         # For now, we use "llm_dit" if batch mode or if user hasn't provided codes
