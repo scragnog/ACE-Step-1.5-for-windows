@@ -460,6 +460,20 @@ def load_lora_slot(self, lora_path: str, slot: Optional[int] = None) -> str:
         self.use_lora = True
         self.lora_loaded = True
         self._merged_dirty = True
+
+        # Extract trigger word metadata from safetensors header
+        safetensors_file = result.get("safetensors_file")
+        if safetensors_file:
+            from acestep.core.generation.handler.lora.lifecycle import _read_trigger_word_from_safetensors
+            tw, tp = _read_trigger_word_from_safetensors(safetensors_file)
+            if tw:
+                self._adapter_trigger_word = tw
+                self._adapter_tag_position = tp or "prepend"
+                logger.info(f"Adapter trigger word: '{tw}' (position: {tp or 'prepend'})")
+            else:
+                self._adapter_trigger_word = ""
+                self._adapter_tag_position = ""
+
         _apply_merged_weights(self)
 
         delta_keys = len(result["delta"])
@@ -498,6 +512,8 @@ def unload_lora_slot(self, slot: Optional[int] = None) -> str:
             if not self._adapter_slots:
                 self.use_lora = False
                 self.lora_loaded = False
+                self._adapter_trigger_word = ""
+                self._adapter_tag_position = ""
             logger.info(f"Unloaded adapter from slot {slot}: {name}")
             return f"✅ Unloaded slot {slot}: {name}"
         else:
@@ -506,6 +522,8 @@ def unload_lora_slot(self, slot: Optional[int] = None) -> str:
             self._next_slot_id = 0
             self.use_lora = False
             self.lora_loaded = False
+            self._adapter_trigger_word = ""
+            self._adapter_tag_position = ""
             self._merged_dirty = True
             _apply_merged_weights(self)
             gc.collect()
