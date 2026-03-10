@@ -100,6 +100,14 @@ def build_generation_success_response(
         num_audios=len(audios),
     )
 
+    # Extract LM-generated audio codes per-audio for upscale reuse
+    audio_codes_list = []
+    for audio in audios:
+        audio_params = audio.get("params", {})
+        codes = audio_params.get("audio_codes", "")
+        if codes and str(codes).strip():
+            audio_codes_list.append(str(codes))
+
     return {
         "first_audio_path": path_to_audio_url(first_audio) if first_audio else None,
         "second_audio_path": path_to_audio_url(second_audio) if second_audio else None,
@@ -122,4 +130,5 @@ def build_generation_success_response(
         "timesignature": _none_if_na_str(metas_out.get("timesignature")),
         "lm_model": lm_model_name,
         "dit_model": dit_model_name,
+        "audio_codes": audio_codes_list if audio_codes_list else None,
     }
