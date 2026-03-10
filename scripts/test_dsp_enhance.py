@@ -231,10 +231,13 @@ def _adaptive_scale(base_value: float, metric: float, target: float = 0.5,
                     sensitivity: float = 1.0) -> float:
     """Scale a DSP parameter based on how far a metric is from its target.
 
-    If metric > target: reduce the effect (audio already has enough)
-    If metric < target: boost the effect (audio needs more)
+    For BOOSTS (positive base): metric > target → less boost needed
+    For CUTS (negative base): metric > target → MORE cut needed
     """
     deficit = target - metric  # positive = needs more of this quality
+    if base_value < 0:
+        # For cuts: invert logic — high metric means we need more cutting
+        deficit = metric - target
     scale = 1.0 + deficit * sensitivity
     return base_value * np.clip(scale, 0.2, 2.0)
 
@@ -313,35 +316,34 @@ def enhance_vocals(audio: np.ndarray, sr: int, intensity: float = 1.0,
     """Adaptive vocal processing. Adjusts based on spectral analysis."""
     p = profile or {}
 
-    # Adaptive scaling: adjust DSP based on what the audio already has
-    dehash_db = _adaptive_scale(-4.0 * intensity, p.get("harshness", 0.5), target=0.3, sensitivity=2.0)
-    warmth_db = _adaptive_scale(2.0 * intensity, p.get("warmth", 0.5), target=0.6, sensitivity=1.5)
-    presence_db = _adaptive_scale(2.5 * intensity, p.get("brightness", 0.5), target=0.5, sensitivity=1.0)
+    # Adaptive scaling
+    dehash_db = _adaptive_scale(-3.0 * intensity, p.get("harshness", 0.5), target=0.3, sensitivity=1.5)
+    warmth_db = _adaptive_scale(1.5 * intensity, p.get("warmth", 0.5), target=0.6, sensitivity=1.5)
+    presence_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.5, sensitivity=1.0)
     air_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.4, sensitivity=1.0)
-    comp_ratio = _adaptive_scale(3.0, p.get("dynamic_range", 0.5), target=0.4, sensitivity=1.5)
+    comp_ratio = _adaptive_scale(2.5, p.get("dynamic_range", 0.5), target=0.4, sensitivity=1.0)
 
     board = Pedalboard([
-        # De-harsh: scale with detected harshness
-        PeakFilter(cutoff_frequency_hz=5500, gain_db=dehash_db, q=1.5),
-        PeakFilter(cutoff_frequency_hz=7500, gain_db=dehash_db * 0.75, q=2.0),
+        # De-harsh: surgical cuts in the fizz zone (tight Q = narrow band)
+        PeakFilter(cutoff_frequency_hz=6000, gain_db=dehash_db, q=3.0),
+        PeakFilter(cutoff_frequency_hz=8000, gain_db=dehash_db * 0.6, q=3.0),
 
-        # Body/warmth: less if already warm
+        # Body/warmth: gentle boost
         LowShelfFilter(cutoff_frequency_hz=200, gain_db=warmth_db, q=0.7),
-        PeakFilter(cutoff_frequency_hz=400, gain_db=warmth_db * 0.75, q=0.8),
 
-        # Presence
+        # Presence: clarity below the fizz zone
         PeakFilter(cutoff_frequency_hz=2500, gain_db=presence_db, q=1.0),
 
-        # Compression: harder if dynamic range is wide
+        # Compression: moderate, EQ-aware
         Compressor(
-            threshold_db=-18, ratio=max(1.5, comp_ratio),
-            attack_ms=10.0, release_ms=80.0
+            threshold_db=-16, ratio=max(1.5, comp_ratio),
+            attack_ms=10.0, release_ms=100.0
         ),
 
-        # Air
+        # Air: sparkle above the fizz zone
         HighShelfFilter(cutoff_frequency_hz=12000, gain_db=air_db, q=0.7),
 
-        Gain(gain_db=1.5 * intensity),
+        Gain(gain_db=1.0 * intensity),
     ])
 
     result = audio.copy()
@@ -349,7 +351,7 @@ def enhance_vocals(audio: np.ndarray, sr: int, intensity: float = 1.0,
         result[ch] = board.process(result[ch], sample_rate=sr)
 
     # Saturation: less if already warm
-    sat_drive = 1.0 + _adaptive_scale(0.3 * intensity, p.get("warmth", 0.5), target=0.6, sensitivity=1.0)
+    sat_drive = 1.0 + _adaptive_scale(0.2 * intensity, p.get("warmth", 0.5), target=0.6, sensitivity=1.0)
     result = _saturate(result, drive=sat_drive)
 
     return result
@@ -357,7 +359,7 @@ def enhance_vocals(audio: np.ndarray, sr: int, intensity: float = 1.0,
 
 def enhance_drums(audio: np.ndarray, sr: int, intensity: float = 1.0,
                   profile: Dict[str, float] = None) -> np.ndarray:
-    """Adaptive drum processing. Adjusts transient shaping based on analysis."""
+    """Adaptive drum processing."""
     p = profile or {}
 
     # Transient shaping: less if transients are already sharp
@@ -365,23 +367,28 @@ def enhance_drums(audio: np.ndarray, sr: int, intensity: float = 1.0,
     result = _transient_shape(
         audio, sr,
         attack_boost=atk_boost,
-        sustain_cut=0.1 * intensity,
+        sustain_cut=0.05 * intensity,
         attack_ms=3.0,
         release_ms=30.0,
     )
 
-    kick_db = _adaptive_scale(3.0 * intensity, p.get("warmth", 0.5), target=0.5, sensitivity=1.0)
+    kick_db = _adaptive_scale(2.5 * intensity, p.get("warmth", 0.5), target=0.5, sensitivity=1.0)
     snap_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.5, sensitivity=1.0)
-    air_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.4, sensitivity=1.0)
+    air_db = _adaptive_scale(1.5 * intensity, p.get("brightness", 0.5), target=0.4, sensitivity=1.0)
 
     board = Pedalboard([
         HighpassFilter(cutoff_frequency_hz=30),
-        PeakFilter(cutoff_frequency_hz=60, gain_db=kick_db, q=1.0),
-        PeakFilter(cutoff_frequency_hz=280, gain_db=-2.5 * intensity, q=0.8),  # mud cut always helpful
+        # Kick punch at sub level
+        PeakFilter(cutoff_frequency_hz=70, gain_db=kick_db, q=1.2),
+        # Mud cut higher up (400Hz, away from kick fundamental)
+        PeakFilter(cutoff_frequency_hz=400, gain_db=-1.5 * intensity, q=0.8),
+        # Snare snap
         PeakFilter(cutoff_frequency_hz=3000, gain_db=snap_db, q=1.0),
+        # Cymbal air
         HighShelfFilter(cutoff_frequency_hz=10000, gain_db=air_db, q=0.7),
-        Compressor(threshold_db=-24, ratio=4.0, attack_ms=1.0, release_ms=40.0),
-        Gain(gain_db=2.0 * intensity),
+        # Moderate compression (let transients breathe)
+        Compressor(threshold_db=-20, ratio=3.0, attack_ms=5.0, release_ms=50.0),
+        Gain(gain_db=1.5 * intensity),
     ])
 
     for ch in range(result.shape[0]):
