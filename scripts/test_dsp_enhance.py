@@ -134,11 +134,115 @@ def separate_stems(audio_path: str, output_dir: str) -> Dict[str, np.ndarray]:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive Spectral Analysis
+# ---------------------------------------------------------------------------
+
+def analyze_stem(audio: np.ndarray, sr: int, name: str = "") -> Dict[str, float]:
+    """Analyze a stem's spectral characteristics to drive adaptive DSP.
+
+    Returns a dict of metrics (0-1 normalized) that describe the audio's
+    existing qualities. Enhancement functions use these to scale processing:
+    - If warmth is already high, reduce warmth boost
+    - If harshness is high, increase de-harsh
+    - If transients are already sharp, reduce transient shaping
+    """
+    # Work with mono sum for analysis
+    mono = np.mean(audio, axis=0) if audio.ndim > 1 and audio.shape[0] > 1 else audio.flatten()
+
+    # Skip near-silent stems
+    rms = np.sqrt(np.mean(mono ** 2))
+    if rms < 1e-6:
+        return {"warmth": 0.5, "brightness": 0.5, "harshness": 0.5,
+                "dynamic_range": 0.5, "transient_sharpness": 0.5, "rms": 0.0}
+
+    # Compute power spectrum
+    n_fft = min(4096, len(mono))
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    # Average over multiple windows for stability
+    n_windows = min(20, max(1, len(mono) // n_fft))
+    hop = max(1, (len(mono) - n_fft) // n_windows)
+    power_sum = np.zeros(len(freqs))
+    for i in range(n_windows):
+        start = i * hop
+        chunk = mono[start:start + n_fft]
+        if len(chunk) < n_fft:
+            chunk = np.pad(chunk, (0, n_fft - len(chunk)))
+        spectrum = np.abs(np.fft.rfft(chunk * np.hanning(n_fft))) ** 2
+        power_sum += spectrum
+    power = power_sum / n_windows
+    power_db = 10 * np.log10(power + 1e-10)
+
+    # Band energy ratios
+    def band_energy(low_hz, high_hz):
+        mask = (freqs >= low_hz) & (freqs < high_hz)
+        return np.mean(power[mask]) if np.any(mask) else 0.0
+
+    total_energy = np.mean(power) + 1e-10
+    sub_bass = band_energy(20, 100) / total_energy
+    low_mid = band_energy(100, 500) / total_energy
+    mid = band_energy(500, 2000) / total_energy
+    upper_mid = band_energy(2000, 5000) / total_energy
+    harsh_zone = band_energy(4000, 8000) / total_energy
+    air = band_energy(8000, 20000) / total_energy
+
+    # Warmth: ratio of low-mid energy to total (0-1, higher = warmer)
+    warmth = np.clip((sub_bass + low_mid) * 3.0, 0, 1)
+
+    # Brightness: ratio of upper frequencies to total
+    brightness = np.clip((upper_mid + air) * 4.0, 0, 1)
+
+    # Harshness: energy in the 4-8kHz "fizz zone" relative to neighbors
+    neighbor_energy = (band_energy(2000, 4000) + band_energy(8000, 12000)) / 2
+    harsh_ratio = band_energy(4000, 8000) / (neighbor_energy + 1e-10)
+    harshness = np.clip((harsh_ratio - 0.5) * 2.0, 0, 1)
+
+    # Dynamic range: ratio of peak to RMS (crest factor)
+    peak = np.max(np.abs(mono))
+    crest = peak / (rms + 1e-10)
+    dynamic_range = np.clip((crest - 1.0) / 15.0, 0, 1)  # normalize ~1-16 range
+
+    # Transient sharpness: how fast envelope rises
+    env = np.abs(mono)
+    win = max(int(0.005 * sr), 1)  # 5ms window
+    smoothed = np.convolve(env, np.ones(win) / win, mode='same')
+    env_diff = np.diff(smoothed)
+    transient_sharpness = np.clip(np.percentile(env_diff[env_diff > 0], 95) * 20, 0, 1)
+
+    profile = {
+        "warmth": float(warmth),
+        "brightness": float(brightness),
+        "harshness": float(harshness),
+        "dynamic_range": float(dynamic_range),
+        "transient_sharpness": float(transient_sharpness),
+        "rms": float(rms),
+    }
+
+    if name:
+        print(f"    [{name}] Analysis: " + ", ".join(f"{k}={v:.2f}" for k, v in profile.items()))
+
+    return profile
+
+
+def _adaptive_scale(base_value: float, metric: float, target: float = 0.5,
+                    sensitivity: float = 1.0) -> float:
+    """Scale a DSP parameter based on how far a metric is from its target.
+
+    If metric > target: reduce the effect (audio already has enough)
+    If metric < target: boost the effect (audio needs more)
+    """
+    deficit = target - metric  # positive = needs more of this quality
+    scale = 1.0 + deficit * sensitivity
+    return base_value * np.clip(scale, 0.2, 2.0)
+
+
+# ---------------------------------------------------------------------------
 # DSP Processing Chains
 # ---------------------------------------------------------------------------
 
 def _saturate(audio: np.ndarray, drive: float = 1.5) -> np.ndarray:
     """Soft-clip saturation using tanh. drive > 1.0 adds harmonics."""
+    if drive <= 1.0:
+        return audio
     return np.tanh(audio * drive) / np.tanh(drive)
 
 
@@ -200,34 +304,39 @@ def _transient_shape(audio: np.ndarray, sr: int,
     return result
 
 
-def enhance_vocals(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.ndarray:
-    """Mastering-grade vocal processing for ACE-Step artifacts.
+def enhance_vocals(audio: np.ndarray, sr: int, intensity: float = 1.0,
+                   profile: Dict[str, float] = None) -> np.ndarray:
+    """Adaptive vocal processing. Adjusts based on spectral analysis."""
+    p = profile or {}
 
-    Targets: fizzy sibilance (4-8kHz), metallic resonance, thin body.
-    """
-    # Chain: de-harsh → warmth → presence → compression → air
+    # Adaptive scaling: adjust DSP based on what the audio already has
+    dehash_db = _adaptive_scale(-4.0 * intensity, p.get("harshness", 0.5), target=0.3, sensitivity=2.0)
+    warmth_db = _adaptive_scale(2.0 * intensity, p.get("warmth", 0.5), target=0.6, sensitivity=1.5)
+    presence_db = _adaptive_scale(2.5 * intensity, p.get("brightness", 0.5), target=0.5, sensitivity=1.0)
+    air_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.4, sensitivity=1.0)
+    comp_ratio = _adaptive_scale(3.0, p.get("dynamic_range", 0.5), target=0.4, sensitivity=1.5)
+
     board = Pedalboard([
-        # De-harsh: tame the ACE-Step fizz zone aggressively
-        PeakFilter(cutoff_frequency_hz=5500, gain_db=-4.0 * intensity, q=1.5),
-        PeakFilter(cutoff_frequency_hz=7500, gain_db=-3.0 * intensity, q=2.0),
+        # De-harsh: scale with detected harshness
+        PeakFilter(cutoff_frequency_hz=5500, gain_db=dehash_db, q=1.5),
+        PeakFilter(cutoff_frequency_hz=7500, gain_db=dehash_db * 0.75, q=2.0),
 
-        # Body/warmth: fill out the thin midrange
-        LowShelfFilter(cutoff_frequency_hz=200, gain_db=2.0 * intensity, q=0.7),
-        PeakFilter(cutoff_frequency_hz=400, gain_db=1.5 * intensity, q=0.8),
+        # Body/warmth: less if already warm
+        LowShelfFilter(cutoff_frequency_hz=200, gain_db=warmth_db, q=0.7),
+        PeakFilter(cutoff_frequency_hz=400, gain_db=warmth_db * 0.75, q=0.8),
 
-        # Presence: clarity without harshness (below the fizz zone)
-        PeakFilter(cutoff_frequency_hz=2500, gain_db=2.5 * intensity, q=1.0),
+        # Presence
+        PeakFilter(cutoff_frequency_hz=2500, gain_db=presence_db, q=1.0),
 
-        # Compression: smooth out AI vocal level variations
+        # Compression: harder if dynamic range is wide
         Compressor(
-            threshold_db=-18, ratio=3.0,
+            threshold_db=-18, ratio=max(1.5, comp_ratio),
             attack_ms=10.0, release_ms=80.0
         ),
 
-        # Air: gentle sparkle above the fizz zone
-        HighShelfFilter(cutoff_frequency_hz=12000, gain_db=2.0 * intensity, q=0.7),
+        # Air
+        HighShelfFilter(cutoff_frequency_hz=12000, gain_db=air_db, q=0.7),
 
-        # Makeup gain
         Gain(gain_db=1.5 * intensity),
     ])
 
@@ -235,173 +344,124 @@ def enhance_vocals(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.nda
     for ch in range(result.shape[0]):
         result[ch] = board.process(result[ch], sample_rate=sr)
 
-    # Subtle warm saturation
-    result = _saturate(result, drive=1.0 + 0.3 * intensity)
+    # Saturation: less if already warm
+    sat_drive = 1.0 + _adaptive_scale(0.3 * intensity, p.get("warmth", 0.5), target=0.6, sensitivity=1.0)
+    result = _saturate(result, drive=sat_drive)
 
     return result
 
 
-def enhance_drums(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.ndarray:
-    """Mastering-grade drum processing for ACE-Step artifacts.
+def enhance_drums(audio: np.ndarray, sr: int, intensity: float = 1.0,
+                  profile: Dict[str, float] = None) -> np.ndarray:
+    """Adaptive drum processing. Adjusts transient shaping based on analysis."""
+    p = profile or {}
 
-    Targets: smeared transients, muddy kick, thin snare.
-    """
-    # Transient shaping first (restore attack that 25Hz VAE smeared)
+    # Transient shaping: less if transients are already sharp
+    atk_boost = _adaptive_scale(0.3 * intensity, p.get("transient_sharpness", 0.3), target=0.6, sensitivity=1.5)
     result = _transient_shape(
         audio, sr,
-        attack_boost=0.3 * intensity,
+        attack_boost=atk_boost,
         sustain_cut=0.1 * intensity,
         attack_ms=3.0,
         release_ms=30.0,
     )
 
-    # EQ chain
+    kick_db = _adaptive_scale(3.0 * intensity, p.get("warmth", 0.5), target=0.5, sensitivity=1.0)
+    snap_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.5, sensitivity=1.0)
+    air_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.4, sensitivity=1.0)
+
     board = Pedalboard([
-        # Clean up sub-rumble
         HighpassFilter(cutoff_frequency_hz=30),
-
-        # Kick punch (50-80Hz)
-        PeakFilter(cutoff_frequency_hz=60, gain_db=3.0 * intensity, q=1.0),
-
-        # Cut mud (200-350Hz)
-        PeakFilter(cutoff_frequency_hz=280, gain_db=-2.5 * intensity, q=0.8),
-
-        # Snare snap (2-4kHz)
-        PeakFilter(cutoff_frequency_hz=3000, gain_db=2.0 * intensity, q=1.0),
-
-        # Cymbal air (10kHz+)
-        HighShelfFilter(cutoff_frequency_hz=10000, gain_db=2.0 * intensity, q=0.7),
-
-        # Parallel-style compression (heavy but mixed)
-        Compressor(
-            threshold_db=-24, ratio=4.0,
-            attack_ms=1.0, release_ms=40.0
-        ),
-
-        # Makeup
+        PeakFilter(cutoff_frequency_hz=60, gain_db=kick_db, q=1.0),
+        PeakFilter(cutoff_frequency_hz=280, gain_db=-2.5 * intensity, q=0.8),  # mud cut always helpful
+        PeakFilter(cutoff_frequency_hz=3000, gain_db=snap_db, q=1.0),
+        HighShelfFilter(cutoff_frequency_hz=10000, gain_db=air_db, q=0.7),
+        Compressor(threshold_db=-24, ratio=4.0, attack_ms=1.0, release_ms=40.0),
         Gain(gain_db=2.0 * intensity),
     ])
 
     for ch in range(result.shape[0]):
         result[ch] = board.process(result[ch], sample_rate=sr)
-
     return result
 
 
-def enhance_bass(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.ndarray:
-    """Mastering-grade bass processing for ACE-Step artifacts.
-
-    Targets: muddy sub, unclear harmonics, phase issues.
-    """
+def enhance_bass(audio: np.ndarray, sr: int, intensity: float = 1.0,
+                 profile: Dict[str, float] = None) -> np.ndarray:
+    """Adaptive bass processing."""
+    p = profile or {}
     result = audio.copy()
 
-    # Mono below 100Hz (tighten sub-bass)
+    # Mono below 100Hz (always — tightens sub-bass)
     if result.shape[0] >= 2:
         nyquist = sr / 2
         low_cut = min(100 / nyquist, 0.99)
         lp_sos = signal.butter(4, low_cut, btype='lowpass', output='sos')
         hp_sos = signal.butter(4, low_cut, btype='highpass', output='sos')
-
-        # Split into sub and upper
         sub_l = signal.sosfilt(lp_sos, result[0])
         sub_r = signal.sosfilt(lp_sos, result[1])
         upper_l = signal.sosfilt(hp_sos, result[0])
         upper_r = signal.sosfilt(hp_sos, result[1])
-
-        # Mono the sub
         sub_mono = (sub_l + sub_r) * 0.5
         result[0] = sub_mono + upper_l
         result[1] = sub_mono + upper_r
 
-    # EQ chain
+    sub_db = _adaptive_scale(2.5 * intensity, p.get("warmth", 0.5), target=0.6, sensitivity=1.0)
+    harmonic_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.3), target=0.4, sensitivity=1.5)
+
     board = Pedalboard([
-        # Remove rumble
         HighpassFilter(cutoff_frequency_hz=30),
-
-        # Sub-bass definition
-        PeakFilter(cutoff_frequency_hz=60, gain_db=2.5 * intensity, q=1.0),
-
-        # Cut mud
+        PeakFilter(cutoff_frequency_hz=60, gain_db=sub_db, q=1.0),
         PeakFilter(cutoff_frequency_hz=250, gain_db=-2.0 * intensity, q=0.8),
-
-        # Upper harmonics (makes bass audible on small speakers)
-        PeakFilter(cutoff_frequency_hz=700, gain_db=2.0 * intensity, q=1.0),
-
-        # Compression for evenness
-        Compressor(
-            threshold_db=-16, ratio=3.5,
-            attack_ms=5.0, release_ms=60.0
-        ),
-
-        # Clean up above bass range
+        PeakFilter(cutoff_frequency_hz=700, gain_db=harmonic_db, q=1.0),
+        Compressor(threshold_db=-16, ratio=3.5, attack_ms=5.0, release_ms=60.0),
         LowpassFilter(cutoff_frequency_hz=5000),
-
         Gain(gain_db=1.0 * intensity),
     ])
 
     for ch in range(result.shape[0]):
         result[ch] = board.process(result[ch], sample_rate=sr)
 
-    # Harmonic excitement via subtle distortion
-    result = _saturate(result, drive=1.0 + 0.5 * intensity)
-
+    sat_drive = 1.0 + _adaptive_scale(0.5 * intensity, p.get("warmth", 0.5), target=0.5, sensitivity=1.0)
+    result = _saturate(result, drive=sat_drive)
     return result
 
 
-def enhance_guitar(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.ndarray:
-    """Guitar-specific enhancement."""
+def enhance_guitar(audio: np.ndarray, sr: int, intensity: float = 1.0,
+                   profile: Dict[str, float] = None) -> np.ndarray:
+    """Adaptive guitar enhancement."""
+    p = profile or {}
+    defizz_db = _adaptive_scale(-2.0 * intensity, p.get("harshness", 0.5), target=0.3, sensitivity=2.0)
+    body_db = _adaptive_scale(1.5 * intensity, p.get("warmth", 0.5), target=0.5, sensitivity=1.0)
+
     board = Pedalboard([
-        # Body
-        PeakFilter(cutoff_frequency_hz=500, gain_db=1.5 * intensity, q=0.8),
-
-        # Presence/bite
+        PeakFilter(cutoff_frequency_hz=500, gain_db=body_db, q=0.8),
         PeakFilter(cutoff_frequency_hz=3000, gain_db=2.0 * intensity, q=1.0),
-
-        # De-fizz (ACE-Step artifacts in guitar)
-        PeakFilter(cutoff_frequency_hz=6000, gain_db=-2.0 * intensity, q=1.5),
-
-        # Air
+        PeakFilter(cutoff_frequency_hz=6000, gain_db=defizz_db, q=1.5),
         HighShelfFilter(cutoff_frequency_hz=10000, gain_db=1.5 * intensity, q=0.7),
-
-        # Light compression
-        Compressor(
-            threshold_db=-18, ratio=2.5,
-            attack_ms=10.0, release_ms=80.0
-        ),
-
+        Compressor(threshold_db=-18, ratio=2.5, attack_ms=10.0, release_ms=80.0),
         Gain(gain_db=1.0 * intensity),
     ])
 
     result = audio.copy()
     for ch in range(result.shape[0]):
         result[ch] = board.process(result[ch], sample_rate=sr)
-
-    # Subtle warmth
     result = _saturate(result, drive=1.0 + 0.2 * intensity)
     return result
 
 
-def enhance_piano(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.ndarray:
-    """Piano-specific enhancement."""
+def enhance_piano(audio: np.ndarray, sr: int, intensity: float = 1.0,
+                  profile: Dict[str, float] = None) -> np.ndarray:
+    """Adaptive piano enhancement."""
+    p = profile or {}
+    warmth_db = _adaptive_scale(1.5 * intensity, p.get("warmth", 0.5), target=0.5, sensitivity=1.0)
+    defizz_db = _adaptive_scale(-2.0 * intensity, p.get("harshness", 0.5), target=0.3, sensitivity=2.0)
+
     board = Pedalboard([
-        # Warmth in low mids
-        PeakFilter(cutoff_frequency_hz=300, gain_db=1.5 * intensity, q=0.8),
-
-        # Clarity/attack
+        PeakFilter(cutoff_frequency_hz=300, gain_db=warmth_db, q=0.8),
         PeakFilter(cutoff_frequency_hz=2500, gain_db=1.5 * intensity, q=1.0),
-
-        # De-fizz
-        PeakFilter(cutoff_frequency_hz=5500, gain_db=-2.0 * intensity, q=1.5),
-
-        # Shimmer
+        PeakFilter(cutoff_frequency_hz=5500, gain_db=defizz_db, q=1.5),
         HighShelfFilter(cutoff_frequency_hz=10000, gain_db=2.0 * intensity, q=0.7),
-
-        # Gentle compression (preserve dynamics)
-        Compressor(
-            threshold_db=-16, ratio=2.0,
-            attack_ms=15.0, release_ms=100.0
-        ),
-
+        Compressor(threshold_db=-16, ratio=2.0, attack_ms=15.0, release_ms=100.0),
         Gain(gain_db=0.5 * intensity),
     ])
 
@@ -411,27 +471,20 @@ def enhance_piano(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.ndar
     return result
 
 
-def enhance_other(audio: np.ndarray, sr: int, intensity: float = 1.0) -> np.ndarray:
-    """Generic 'other' instruments enhancement."""
+def enhance_other(audio: np.ndarray, sr: int, intensity: float = 1.0,
+                  profile: Dict[str, float] = None) -> np.ndarray:
+    """Adaptive generic instrument enhancement."""
+    p = profile or {}
+    body_db = _adaptive_scale(1.5 * intensity, p.get("warmth", 0.5), target=0.5, sensitivity=1.0)
+    defizz_db = _adaptive_scale(-2.0 * intensity, p.get("harshness", 0.5), target=0.3, sensitivity=2.0)
+    presence_db = _adaptive_scale(2.0 * intensity, p.get("brightness", 0.5), target=0.5, sensitivity=1.0)
+
     board = Pedalboard([
-        # Body
-        LowShelfFilter(cutoff_frequency_hz=200, gain_db=1.5 * intensity, q=0.7),
-
-        # Presence
-        PeakFilter(cutoff_frequency_hz=2000, gain_db=2.0 * intensity, q=1.0),
-
-        # De-fizz
-        PeakFilter(cutoff_frequency_hz=6000, gain_db=-2.0 * intensity, q=1.5),
-
-        # Air
-        HighShelfFilter(cutoff_frequency_hz=10000, gain_db=2.0 * intensity, q=0.7),
-
-        # Light compression
-        Compressor(
-            threshold_db=-18, ratio=2.0,
-            attack_ms=10.0, release_ms=80.0
-        ),
-
+        LowShelfFilter(cutoff_frequency_hz=200, gain_db=body_db, q=0.7),
+        PeakFilter(cutoff_frequency_hz=2000, gain_db=presence_db, q=1.0),
+        PeakFilter(cutoff_frequency_hz=6000, gain_db=defizz_db, q=1.5),
+        HighShelfFilter(cutoff_frequency_hz=10000, gain_db=1.5 * intensity, q=0.7),
+        Compressor(threshold_db=-18, ratio=2.0, attack_ms=10.0, release_ms=80.0),
         Gain(gain_db=1.0 * intensity),
     ])
 
@@ -520,9 +573,13 @@ def process_audio(input_path: Path, output_path: Path,
         print("  ERROR: No stems extracted!")
         return False
 
-    print(f"\n--- Per-Stem Enhancement ---")
+    print(f"\n--- Spectral Analysis ---")
+    profiles = {}
+    for name, data in stems.items():
+        profiles[name] = analyze_stem(data, sr, name)
 
-    # Map stem types to enhancement functions
+    print(f"\n--- Per-Stem Enhancement (adaptive) ---")
+
     enhancers = {
         "vocals": enhance_vocals,
         "drums": enhance_drums,
@@ -536,7 +593,7 @@ def process_audio(input_path: Path, output_path: Path,
     for name, data in stems.items():
         enhancer = enhancers.get(name, enhance_other)
         print(f"  Enhancing {name}...")
-        enhanced_stems[name] = enhancer(data, sr, intensity)
+        enhanced_stems[name] = enhancer(data, sr, intensity, profile=profiles.get(name))
 
     # Save individual stems if requested
     if save_stems:
