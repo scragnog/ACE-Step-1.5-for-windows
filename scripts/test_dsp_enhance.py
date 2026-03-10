@@ -26,7 +26,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 import numpy as np
 import soundfile as sf
@@ -66,10 +66,11 @@ ROFORMER_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 DEMUCS_6S_MODEL = "htdemucs_6s.yaml"
 
 
-def separate_stems(audio_path: str, output_dir: str) -> Dict[str, np.ndarray]:
+def separate_stems(audio_path: str, output_dir: str) -> Tuple[Dict[str, np.ndarray], int]:
     """Two-pass stem separation: RoFormer vocals + htdemucs_6s instrumental.
 
-    Returns dict of stem_name -> numpy array [channels, samples].
+    Returns (stems_dict, stem_sample_rate) where stems_dict maps
+    stem_name -> numpy array [channels, samples].
     """
     from audio_separator.separator import Separator
 
@@ -78,6 +79,7 @@ def separate_stems(audio_path: str, output_dir: str) -> Dict[str, np.ndarray]:
     sep.output_format = "wav"
 
     stems = {}
+    stem_sr = None
 
     with _float32_default_dtype():
         # Pass 1: BS-RoFormer → vocals + instrumental
@@ -97,13 +99,13 @@ def separate_stems(audio_path: str, output_dir: str) -> Dict[str, np.ndarray]:
                 instrumental_path = fp
 
         if vocals_path:
-            data, sr = sf.read(vocals_path, dtype="float32")
+            data, stem_sr = sf.read(vocals_path, dtype="float32")
             stems["vocals"] = data.T if data.ndim == 2 else data.reshape(1, -1)
-            print(f"    Vocals: {stems['vocals'].shape}")
+            print(f"    Vocals: {stems['vocals'].shape}, {stem_sr}Hz")
 
         if not instrumental_path:
             print("  WARNING: No instrumental found, returning vocals only")
-            return stems
+            return stems, stem_sr or 44100
 
         # Pass 2: htdemucs_6s on instrumental → drums, bass, guitar, piano, other
         print(f"  Pass 2/2: Splitting instrumental with htdemucs_6s...")
@@ -126,11 +128,13 @@ def separate_stems(audio_path: str, output_dir: str) -> Dict[str, np.ndarray]:
                     stem_type = candidate
                     break
 
-            data, sr = sf.read(fp, dtype="float32")
+            data, file_sr = sf.read(fp, dtype="float32")
+            if stem_sr is None:
+                stem_sr = file_sr
             stems[stem_type] = data.T if data.ndim == 2 else data.reshape(1, -1)
-            print(f"    {stem_type}: {stems[stem_type].shape}")
+            print(f"    {stem_type}: {stems[stem_type].shape}, {file_sr}Hz")
 
-    return stems
+    return stems, stem_sr or 44100
 
 
 # ---------------------------------------------------------------------------
@@ -567,11 +571,24 @@ def process_audio(input_path: Path, output_path: Path,
     # Separate stems
     print(f"\n--- Stem Separation ---")
     with tempfile.TemporaryDirectory(prefix="ace_dsp_") as tmp_dir:
-        stems = separate_stems(str(input_path), tmp_dir)
+        stems, stem_sr = separate_stems(str(input_path), tmp_dir)
 
     if not stems:
         print("  ERROR: No stems extracted!")
         return False
+
+    # Resample stems to match original sample rate if needed
+    if stem_sr != sr:
+        import librosa
+        print(f"  Resampling stems from {stem_sr}Hz to {sr}Hz...")
+        for name in stems:
+            resampled_channels = []
+            for ch in range(stems[name].shape[0]):
+                resampled_channels.append(
+                    librosa.resample(stems[name][ch], orig_sr=stem_sr, target_sr=sr)
+                )
+            stems[name] = np.stack(resampled_channels)
+        print(f"  Resampled all {len(stems)} stems")
 
     print(f"\n--- Spectral Analysis ---")
     profiles = {}
