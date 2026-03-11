@@ -55,6 +55,7 @@ def update_local_cache(
             result_data = [result]
         else:
             audio_paths = result.get("audio_paths", [])
+            original_audio_paths = result.get("original_audio_paths") or []
             final_prompt = result.get("prompt", "")
             final_lyrics = result.get("lyrics", "")
             metas_raw = result.get("metas", {}) or {}
@@ -91,6 +92,7 @@ def update_local_cache(
                         "progress": 1.0,
                         "stage": "succeeded",
                         **(({"audio_codes": response_audio_codes[i]}) if i < len(response_audio_codes) else {}),
+                        **({"original_audio_paths": original_audio_paths} if i == 0 and original_audio_paths else {}),
                     }
                     for i, path in enumerate(audio_paths)
                 ]
