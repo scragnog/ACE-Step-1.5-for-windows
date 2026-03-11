@@ -70,7 +70,12 @@ Pre-process source audio before generation with two independent controls: **Temp
 ### 🎛️ Server-Side Stem Separation
 Professional-grade audio stem separation powered by BS-RoFormer (SDR 12.97) and Demucs, with 4 separation modes: Vocals Only, 4-Stem, 6-Stem, and Two-Pass (best quality). Results appear in a **synchronized multi-track mixer** with per-stem volume, mute/solo, and download controls. Models are lazy-downloaded on first use (~1.8 GB). ACE-Step models are automatically offloaded to CPU during separation and restored to GPU after, preventing VRAM exhaustion.
 
-### ✨ Audio Enhancement Studio
+### 🎛️ Auto-Mastering
+Every generated track is automatically run through a **learned mastering profile** that applies multi-band EQ shaping, harmonic saturation, stereo widening, dynamic compression, and loudness maximization with a final peak limiter — the same processing chain used by professional mastering engineers. The mastering profile was learned by comparing raw and professionally mastered reference audio. Enabled by default via a toggle in **Output Processing**. Produces noticeably louder, wider, and more polished audio straight out of the generator.
+
+### ✨ Audio Enhancement Studio *(Legacy)*
+> ⚠️ **Deprecated:** The Auto-Mastering feature above replaces this for most use cases. This tool remains available for users who want manual per-stem DSP control.
+
 Post-processing engine ported from [ComfyUI-Audio_Quality_Enhancer](https://github.com/ShmuelRonen/ComfyUI-Audio_Quality_Enhancer). Apply multi-band EQ (clarity, warmth, air/brilliance, dynamics), reverb (synthetic IR convolution), echo, and stereo widening (mid/side + Haas effect) to any track. **Two modes:** Simple (full-mix DSP via [pedalboard](https://github.com/spotify/pedalboard)/scipy) and Stem Separation (Demucs splits → per-stem targeted enhancement → remix). Comes with **6 built-in presets** (Radio Ready, Warm & Rich, Bright & Clear, Club Master, Lo-Fi Chill, Cinematic) and full manual control. Accessible from any song's dropdown menu → "Enhance Audio".
 
 ### 🔀 A/B Track Comparison

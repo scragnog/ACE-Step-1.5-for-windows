@@ -733,7 +733,7 @@ def generate_music(
                      logger.error(f"Normalization failed: {e}")
             # -------------------------------
 
-            # --- AUTO-MASTERING (learned Ozone profile) ---
+            # --- AUTO-MASTERING (learned mastering profile) ---
             if params.auto_master:
                 try:
                     if not hasattr(generate_music, '_mastering_engine'):

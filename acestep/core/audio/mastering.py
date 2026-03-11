@@ -3,8 +3,8 @@ Auto-Mastering Engine
 =====================
 Applies a learned mastering profile (EQ, compression, saturation, stereo
 widening, limiting) to generated audio. The default profile was learned
-from an iZotope Ozone 11 "High Detail Wide" processing chain by comparing
-original and processed reference tracks.
+from a professional mastering processing chain by comparing original
+and processed reference tracks.
 
 Usage in the generation pipeline::
 
@@ -25,14 +25,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Bundled default profile (learned from Ozone 11 "High Detail Wide")
+# Bundled default profile (learned from professional mastering chain)
 _DEFAULT_PROFILE = Path(__file__).parent / "mastering_profile.json"
 
 
 class MasteringEngine:
     """Profile-based mastering processor using pedalboard.
 
-    Gain staging order (matches how Ozone works internally):
+    Gain staging order (matches professional mastering signal flow):
       1. EQ shape (relative boosts/cuts only, no overall gain)
       2. Light saturation (exciter warmth)
       3. Stereo widening (imager)

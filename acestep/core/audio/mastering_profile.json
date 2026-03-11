@@ -1,6 +1,6 @@
 {
   "source_original": "suite.wav",
-  "source_processed": "suite_ozone.wav",
+  "source_processed": "reference_mastered.wav",
   "sample_rate": 48000,
   "overall_gain_db": 10.7,
   "eq_bands": [

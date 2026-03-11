@@ -837,7 +837,57 @@ When "Composite (2-Stage)" is selected, a purple-bordered panel appears below th
 ---
 
 
-## Audio Enhancement Studio
+## Auto-Mastering
+
+**Branch:** `qinglong`  
+**Status:** ✅ Merged
+
+Automatic post-generation mastering that applies a learned professional mastering profile to every generated track. The profile was derived by comparing raw audio with its professionally mastered counterpart, extracting the exact EQ curve, dynamics, stereo field, and loudness characteristics.
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/core/audio/mastering.py` | **[NEW]** `MasteringEngine` class — loads a JSON mastering profile and applies a 6-stage processing chain via pedalboard |
+| `acestep/core/audio/mastering_profile.json` | **[NEW]** Bundled default profile learned from professional reference mastering |
+| `acestep/inference.py` | `auto_master` param in `GenerationParams`; mastering hook runs between normalization and audio save |
+| `acestep/api/http/release_task_models.py` | `auto_master` field in `GenerateMusicRequest` |
+| `acestep/api/job_generation_setup.py` | Wire `auto_master` from request to `GenerationParams` |
+| `ace-step-ui/components/sections/CoverRepaintSettings.tsx` | Auto-Master toggle in Output Processing accordion |
+| `ace-step-ui/components/CreatePanel.tsx` | State + prop wiring |
+| `ace-step-ui/server/src/routes/generate.ts` | Pass `auto_master` to Python API |
+| `ace-step-ui/server/src/services/acestep.ts` | Pass `auto_master` in `submitToApi` |
+| `ace-step-ui/i18n/translations.ts` | `autoMaster` keys in en/zh/ja/ko |
+
+### Processing chain
+
+The `MasteringEngine` applies 6 stages in professional gain-staging order:
+
+1. **EQ shaping** — Multi-band parametric EQ (low shelf, peak, high shelf) to match the learned frequency curve
+2. **Harmonic saturation** — Soft-clip exciter adding subtle warmth and presence
+3. **Stereo widening** — Mid/side processing to widen the stereo field by the learned amount
+4. **Compression** — Dynamic range taming with the learned threshold and ratio
+5. **Loudness push + limiter** — Gain boost (up to +6 dB) through a brick-wall limiter at -0.5 dBFS
+6. **Peak normalization** — Final normalize to -0.1 dBFS for maximum loudness without clipping
+
+### How it works
+
+1. **Enabled by default** — the Auto-Master toggle is ON in the Output Processing accordion
+2. After the diffusion model generates audio and normalization runs, the `MasteringEngine` processes the audio tensor in-place
+3. The engine converts the PyTorch tensor to NumPy, applies the 6-stage chain via `pedalboard`, and writes back
+4. Toggle OFF to get raw, unmastered output (useful for manual post-processing in a DAW)
+5. The mastering profile is a plain JSON file — power users can create custom profiles by running the `learn_from_reference.py` script against their own reference/mastered audio pairs
+
+### Dependencies
+
+- **Required:** `pedalboard` (already in requirements), `numpy`
+- The engine lazy-imports pedalboard on first use — zero overhead when disabled
+
+---
+
+## Audio Enhancement Studio *(Legacy)*
+
+> ⚠️ **Deprecated:** The [Auto-Mastering](#auto-mastering) feature above replaces this for most use cases. This tool remains available for users who want manual per-stem DSP control.
 
 **Branch:** `feature/audio-enhancer`  
 **Status:** ✅ Merged  
