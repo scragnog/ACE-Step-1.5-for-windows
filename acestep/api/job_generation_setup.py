@@ -174,6 +174,7 @@ def build_generation_setup(
         enable_normalization=getattr(req, "enable_normalization", True),
         normalization_db=getattr(req, "normalization_db", -1.0),
         auto_master=getattr(req, "auto_master", True),
+        mastering_params=getattr(req, "mastering_params", None),
         latent_shift=getattr(req, "latent_shift", 0.0),
         latent_rescale=getattr(req, "latent_rescale", 1.0),
         # Scoring & LRC

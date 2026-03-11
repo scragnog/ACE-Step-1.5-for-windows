@@ -117,6 +117,7 @@ class GenerationParams:
     enable_normalization: bool = True
     normalization_db: float = -1.0
     auto_master: bool = True  # Apply learned mastering profile after generation
+    mastering_params: Optional[Dict] = None  # Override mastering parameters from console UI
 
     # Latent Post-Processing (before VAE decode)
     latent_shift: float = 0.0       # Additive shift on DiT latents. Default 0 = no shift.
@@ -734,6 +735,8 @@ def generate_music(
             # -------------------------------
 
             # --- AUTO-MASTERING (learned mastering profile) ---
+            # Keep a reference to the unmastered tensor for dual-file save
+            unmastered_tensor = audio_tensor.clone()
             if params.auto_master:
                 try:
                     if not hasattr(generate_music, '_mastering_engine'):
@@ -744,7 +747,8 @@ def generate_music(
                     engine = generate_music._mastering_engine
                     # Convert torch [channels, samples] → numpy [channels, samples]
                     audio_np = audio_tensor.cpu().numpy().astype("float32")
-                    audio_np = engine.master(audio_np, sample_rate)
+                    audio_np = engine.master(audio_np, sample_rate,
+                                            params_override=params.mastering_params)
                     audio_tensor = torch.from_numpy(audio_np)
                     logger.info(f"[AutoMaster] Audio {idx} mastered (peak={torch.max(torch.abs(audio_tensor)).item():.4f})")
                 except Exception as e:
@@ -764,6 +768,7 @@ def generate_music(
 
             # Save audio file (handled outside handler)
             audio_path = None
+            original_path = None
             if audio_tensor is not None and save_dir is not None:
 
                 try:
@@ -780,6 +785,20 @@ def generate_music(
                     logger.error(f"[generate_music] Failed to save audio file: {e}")
                     audio_path = ""  # Fallback to empty path
 
+                # Save original (unmastered) version for A/B comparison & re-mastering
+                if params.auto_master and unmastered_tensor is not None:
+                    try:
+                        original_file = os.path.join(save_dir, f"{audio_key}_original.{file_ext}")
+                        original_path = audio_saver.save_audio(
+                            unmastered_tensor,
+                            original_file,
+                            sample_rate=sample_rate,
+                            format=audio_format,
+                            channels_first=True)
+                        logger.info(f"[AutoMaster] Original (unmastered) saved: {original_path}")
+                    except Exception as e:
+                        logger.warning(f"[AutoMaster] Failed to save original: {e}")
+
             # Save LM hints tensor alongside audio (for preview → HQ upscale)
             lm_hints_path_for_audio = None
             lm_hints_tensor = dit_extra_outputs.get("precomputed_lm_hints_25Hz")
@@ -795,6 +814,7 @@ def generate_music(
 
             audio_dict = {
                 "path": audio_path or "",  # File path (saved here, not in handler)
+                "original_path": original_path or "",  # Unmastered version for A/B
                 "tensor": audio_tensor,  # Audio tensor [channels, samples], CPU, float32
                 "key": audio_key,
                 "sample_rate": sample_rate,

@@ -61,6 +61,7 @@ def build_generation_success_response(
 
     audios: list[dict[str, Any]] = list(result.audios)
     audio_paths = [audio["path"] for audio in audios if audio.get("path")]
+    original_paths = [audio["original_path"] for audio in audios if audio.get("original_path")]
     first_audio = audio_paths[0] if len(audio_paths) > 0 else None
     second_audio = audio_paths[1] if len(audio_paths) > 1 else None
 
@@ -112,6 +113,7 @@ def build_generation_success_response(
         "first_audio_path": path_to_audio_url(first_audio) if first_audio else None,
         "second_audio_path": path_to_audio_url(second_audio) if second_audio else None,
         "audio_paths": [path_to_audio_url(path) for path in audio_paths],
+        "original_audio_paths": [path_to_audio_url(path) for path in original_paths] if original_paths else None,
         "raw_audio_paths": list(audio_paths),
         "generation_info": generation_info,
         "status_message": result.status_message,

@@ -1,0 +1,74 @@
+{
+  "name": "Default",
+  "description": "Warm, balanced master with gentle HF boost. Learned from professional reference chain.",
+  "source_original": "suite.wav",
+  "source_processed": "reference_mastered.wav",
+  "sample_rate": 48000,
+  "overall_gain_db": 10.7,
+  "eq_bands": [
+    {
+      "type": "low_shelf",
+      "freq_hz": 80.0,
+      "gain_db": -2.77,
+      "q": 0.7
+    },
+    {
+      "type": "peak",
+      "freq_hz": 113.5,
+      "gain_db": -2.27,
+      "q": 0.1
+    },
+    {
+      "type": "peak",
+      "freq_hz": 904.3,
+      "gain_db": 0.23,
+      "q": 4.5
+    },
+    {
+      "type": "peak",
+      "freq_hz": 2014.8,
+      "gain_db": -0.58,
+      "q": 2.6
+    },
+    {
+      "type": "peak",
+      "freq_hz": 3838.3,
+      "gain_db": -0.96,
+      "q": 2.5
+    },
+    {
+      "type": "peak",
+      "freq_hz": 5714.4,
+      "gain_db": -1.08,
+      "q": 3.1
+    },
+    {
+      "type": "peak",
+      "freq_hz": 19925.3,
+      "gain_db": 8.01,
+      "q": 1.2
+    },
+    {
+      "type": "high_shelf",
+      "freq_hz": 10000.0,
+      "gain_db": 3.24,
+      "q": 0.7
+    }
+  ],
+  "dynamics": {
+    "estimated_ratio": 1.22,
+    "estimated_threshold_db": -21.8,
+    "dynamic_range_original_db": 17.5,
+    "dynamic_range_processed_db": 14.3,
+    "gain_change_db": 8.8
+  },
+  "stereo": {
+    "width_change": 0.433,
+    "original_side_ratio": 0.087,
+    "processed_side_ratio": 0.1246
+  },
+  "exciter": {
+    "harmonic_increase": 0.726,
+    "estimated_drive": 2.45
+  }
+}

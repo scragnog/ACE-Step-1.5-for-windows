@@ -23,6 +23,7 @@ from acestep.api.http.stats_route import register_stats_route
 from acestep.api.http.steering_routes import register_steering_routes
 from acestep.api.http.stems_routes import register_stems_routes
 from acestep.api.http.system_routes import register_system_routes
+from acestep.api.http.mastering_routes import register_mastering_routes
 from acestep.api.train_api_service import register_training_api_routes
 from acestep.openrouter_adapter import create_openrouter_router
 
@@ -205,6 +206,11 @@ def configure_api_routes(
     )
 
     register_enhance_routes(
+        app=app,
+        get_project_root=get_project_root,
+    )
+
+    register_mastering_routes(
         app=app,
         get_project_root=get_project_root,
     )
