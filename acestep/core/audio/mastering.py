@@ -40,7 +40,7 @@ _PRESETS_DIR = Path(__file__).parent / "presets"
 _LEGACY_PROFILE = Path(__file__).parent / "mastering_profile.json"
 
 # Built-in preset IDs that cannot be deleted
-_BUILTIN_PRESETS = {"default", "ozone1"}
+_BUILTIN_PRESETS = {"preset_1", "preset_2"}
 
 
 class MasteringEngine:

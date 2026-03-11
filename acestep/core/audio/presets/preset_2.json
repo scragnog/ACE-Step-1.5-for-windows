@@ -1,0 +1,56 @@
+{
+  "name": "Preset 2",
+  "description": "Bright, exciting master with HF shimmer and wide stereo. Learned from Ozone reference processing.",
+  "source_original": "test-this.mp3",
+  "source_processed": "test-this-ozone-1.wav",
+  "sample_rate": 48000,
+  "overall_gain_db": 0.0,
+  "eq_bands": [
+    {
+      "type": "peak",
+      "freq_hz": 150.0,
+      "gain_db": 2.24,
+      "q": 0.5
+    },
+    {
+      "type": "peak",
+      "freq_hz": 500.0,
+      "gain_db": -1.84,
+      "q": 1.0
+    },
+    {
+      "type": "peak",
+      "freq_hz": 6000.0,
+      "gain_db": 4.02,
+      "q": 2.0
+    },
+    {
+      "type": "high_shelf",
+      "freq_hz": 10000.0,
+      "gain_db": 8.0,
+      "q": 0.7
+    },
+    {
+      "type": "peak",
+      "freq_hz": 16000.0,
+      "gain_db": 8.0,
+      "q": 1.0
+    }
+  ],
+  "dynamics": {
+    "estimated_ratio": 1.24,
+    "estimated_threshold_db": -22.8,
+    "dynamic_range_original_db": 14.4,
+    "dynamic_range_processed_db": 11.6,
+    "gain_change_db": 2.4
+  },
+  "stereo": {
+    "width_change": 0.095,
+    "original_side_ratio": 0.3218,
+    "processed_side_ratio": 0.4168
+  },
+  "exciter": {
+    "harmonic_increase": 1.701,
+    "estimated_drive": 3.0
+  }
+}
