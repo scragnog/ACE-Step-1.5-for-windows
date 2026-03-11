@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from typing import Callable, Dict
 
 from fastapi import FastAPI, HTTPException, Request
@@ -99,13 +100,14 @@ def register_mastering_routes(
             engine = MasteringEngine()
             mastered = engine.master(audio_data, sample_rate, params_override=mastering_params)
 
-            # Save re-mastered file alongside the original
+            # Save re-mastered file alongside the original, with a unique ID to prevent overwrites
             base, ext = os.path.splitext(audio_path)
-            # If this is an _original file, output as the main file
+            uid_suffix = uuid.uuid4().hex[:8]
+            # If this is an _original file, swap it
             if base.endswith("_original"):
-                output_path = base.replace("_original", "_remastered") + ext
+                output_path = base.replace("_original", f"_remastered_{uid_suffix}") + ext
             else:
-                output_path = base + "_remastered" + ext
+                output_path = base + f"_remastered_{uid_suffix}" + ext
 
             # Convert back to [samples, channels]
             sf.write(output_path, mastered.T, sample_rate)
