@@ -70,8 +70,12 @@ Pre-process source audio before generation with two independent controls: **Temp
 ### 🎛️ Server-Side Stem Separation
 Professional-grade audio stem separation powered by BS-RoFormer (SDR 12.97) and Demucs, with 4 separation modes: Vocals Only, 4-Stem, 6-Stem, and Two-Pass (best quality). Results appear in a **synchronized multi-track mixer** with per-stem volume, mute/solo, and download controls. Models are lazy-downloaded on first use (~1.8 GB). ACE-Step models are automatically offloaded to CPU during separation and restored to GPU after, preventing VRAM exhaustion.
 
-### 🎛️ Auto-Mastering
-Every generated track is automatically run through a **learned mastering profile** that applies multi-band EQ shaping, harmonic saturation, stereo widening, dynamic compression, and loudness maximization with a final peak limiter — the same processing chain used by professional mastering engineers. The mastering profile was learned by comparing raw and professionally mastered reference audio. Enabled by default via a toggle in **Output Processing**. Produces noticeably louder, wider, and more polished audio straight out of the generator.
+### 🎛️ Auto-Mastering & Mastering Console
+Every generated track is automatically run through a professional mastering chain applying multi-band EQ shaping, harmonic saturation, stereo widening, dynamic compression, and loudness maximization via a peak limiter. By default, it uses a profile learned from professional reference audio. 
+- **Mastering Console:** Click the sliders icon on any track to open the interactive **Mastering Console**. Tweak EQ bands, drive, width, threshold, and gain in real-time. Each slider includes educational tooltips to help you avoid clipping and distortion.
+- **Persistent Settings:** Your custom mastering settings are saved globally and automatically applied to all future generated tracks.
+- **Remastering:** Click **Remaster** on any existing track to process the original raw audio with new console settings without re-generating from scratch.
+- **Download Options:** When downloading an auto-mastered track, the download modal allows you to select whether you want the **Mastered** version, the raw uncompressed **Original** output from the diffusion model, or **Both**.
 
 ### ✨ Audio Enhancement Studio *(Legacy)*
 > ⚠️ **Deprecated:** The Auto-Mastering feature above replaces this for most use cases. This tool remains available for users who want manual per-stem DSP control.

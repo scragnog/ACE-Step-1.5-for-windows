@@ -837,46 +837,42 @@ When "Composite (2-Stage)" is selected, a purple-bordered panel appears below th
 ---
 
 
-## Auto-Mastering
+## Auto-Mastering & Mastering Console
 
 **Branch:** `qinglong`  
 **Status:** ✅ Merged
 
-Automatic post-generation mastering that applies a learned professional mastering profile to every generated track. The profile was derived by comparing raw audio with its professionally mastered counterpart, extracting the exact EQ curve, dynamics, stereo field, and loudness characteristics.
+Automatic post-generation mastering that applies a professional mastering profile to every generated track. The system includes an interactive console for real-time adjustments, persistent settings across sessions, and the ability to remaster previously generated tracks.
 
 ### What's included
 
 | File | Description |
 |------|-------------|
-| `acestep/core/audio/mastering.py` | **[NEW]** `MasteringEngine` class — loads a JSON mastering profile and applies a 6-stage processing chain via pedalboard |
-| `acestep/core/audio/mastering_profile.json` | **[NEW]** Bundled default profile learned from professional reference mastering |
-| `acestep/inference.py` | `auto_master` param in `GenerationParams`; mastering hook runs between normalization and audio save |
-| `acestep/api/http/release_task_models.py` | `auto_master` field in `GenerateMusicRequest` |
-| `acestep/api/job_generation_setup.py` | Wire `auto_master` from request to `GenerationParams` |
-| `ace-step-ui/components/sections/CoverRepaintSettings.tsx` | Auto-Master toggle in Output Processing accordion |
-| `ace-step-ui/components/CreatePanel.tsx` | State + prop wiring |
-| `ace-step-ui/server/src/routes/generate.ts` | Pass `auto_master` to Python API |
-| `ace-step-ui/server/src/services/acestep.ts` | Pass `auto_master` in `submitToApi` |
-| `ace-step-ui/i18n/translations.ts` | `autoMaster` keys in en/zh/ja/ko |
+| `acestep/core/audio/mastering.py` | `MasteringEngine` class — applies a 6-stage processing chain via pedalboard, maps frontend parameters to DSP values |
+| `acestep/core/audio/presets/*.json` | Bundled default presets (Preset 1, Preset 2) learned from professional reference mastering |
+| `acestep/inference.py` | `auto_master` and `mastering_params` in `GenerationParams`; mastering hook runs between normalization and audio save |
+| `acestep/api/http/mastering_routes.py` | **[NEW]** Provides the `/v1/mastering/remaster` endpoint to apply new settings to existing audio files |
+| `ace-step-ui/components/MasteringConsoleModal.tsx` | **[NEW]** Interactive console with sliders for 5-band EQ, Exciter Drive, Stereo Width, Threshold, Ratio, Gain, and Ceiling |
+| `ace-step-ui/components/DownloadModal.tsx` | Upgraded to allow downloading 'original', 'mastered', or 'both' versions of a track |
+| `ace-step-ui/App.tsx` | Global parameter persistence via `localStorage`, download version handling, console mounting |
 
 ### Processing chain
 
 The `MasteringEngine` applies 6 stages in professional gain-staging order:
 
-1. **EQ shaping** — Multi-band parametric EQ (low shelf, peak, high shelf) to match the learned frequency curve
-2. **Harmonic saturation** — Soft-clip exciter adding subtle warmth and presence
-3. **Stereo widening** — Mid/side processing to widen the stereo field by the learned amount
-4. **Compression** — Dynamic range taming with the learned threshold and ratio
-5. **Loudness push + limiter** — Gain boost (up to +6 dB) through a brick-wall limiter at -0.5 dBFS
-6. **Peak normalization** — Final normalize to -0.1 dBFS for maximum loudness without clipping
+1. **EQ shaping** — 5-Bands (Sub, Low, Mid, Presence, Air) 
+2. **Harmonic saturation** — Soft-clip exciter drive for subtle warmth
+3. **Stereo widening** — Mid/side processing to expand the stereo image
+4. **Compression** — Dynamic range taming with configurable threshold and ratio
+5. **Loudness push + limiter** — Gain boost through a brick-wall limiter with an absolute output ceiling
+6. **Peak normalization** — Final safety normalize to -0.1 dBFS
 
 ### How it works
 
-1. **Enabled by default** — the Auto-Master toggle is ON in the Output Processing accordion
-2. After the diffusion model generates audio and normalization runs, the `MasteringEngine` processes the audio tensor in-place
-3. The engine converts the PyTorch tensor to NumPy, applies the 6-stage chain via `pedalboard`, and writes back
-4. Toggle OFF to get raw, unmastered output (useful for manual post-processing in a DAW)
-5. The mastering profile is a plain JSON file — power users can create custom profiles by running the `learn_from_reference.py` script against their own reference/mastered audio pairs
+1. **Interactive Console**: Click the sliders icon on any generated track to open the Mastering Console. You can tweak all the DSP parameters in real-time. Hover over parameter labels to view tooltips explaining how they affect the sound and warning against clipping.
+2. **Persistent Settings**: Any tweaks made in the console are saved automatically to `localStorage` and act as your default global mastering profile for all future generated tracks.
+3. **Remastering**: Click **Remaster** in any track's dropdown menu. This opens the console loaded with the track's existing mastering settings. You can tweak the sliders, choose a different preset, and hit Apply — the Node/Python backend will re-run the `pedalboard` pipeline against the *original unmastered audio file* and create a new master, taking just milliseconds instead of regenerating the whole track.
+4. **Download Choice**: When downloading an auto-mastered track, the Download Modal offers a sub-selection: download the final **Mastered** version, the raw uncompressed **Original** generated by diffusion, or **Both**.
 
 ### Dependencies
 
