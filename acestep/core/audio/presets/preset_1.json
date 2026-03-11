@@ -4,7 +4,7 @@
   "source_original": "suite.wav",
   "source_processed": "reference_mastered.wav",
   "sample_rate": 48000,
-  "overall_gain_db": 10.7,
+  "overall_gain_db": 6.5,
   "eq_bands": [
     {
       "type": "low_shelf",
@@ -70,5 +70,6 @@
   "exciter": {
     "harmonic_increase": 0.726,
     "estimated_drive": 2.45
-  }
+  },
+  "limiter_ceiling_db": -1.0
 }
