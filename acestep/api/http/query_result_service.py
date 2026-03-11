@@ -77,6 +77,7 @@ def _build_store_result_payload(
             result_data = [record.result]
         else:
             audio_paths = record.result.get("audio_paths", [])
+            original_audio_paths = record.result.get("original_audio_paths") or []
             metas = record.result.get("metas", {}) or {}
             response_audio_codes = record.result.get("audio_codes") or []
             result_data = [
@@ -96,6 +97,15 @@ def _build_store_result_payload(
                         "timesignature": metas.get("timesignature", ""),
                     },
                     **({"audio_codes": response_audio_codes[i]} if i < len(response_audio_codes) else {}),
+                    # Include original_audio_paths on the first item for A/B toggle
+                    **({"original_audio_paths": original_audio_paths} if i == 0 and original_audio_paths else {}),
+                    # Also include extra top-level result fields on first item
+                    **({"generation_info": record.result.get("generation_info")} if i == 0 and record.result.get("generation_info") else {}),
+                    **({"seed_value": record.result.get("seed_value")} if i == 0 and record.result.get("seed_value") else {}),
+                    **({"dit_model": record.result.get("dit_model")} if i == 0 and record.result.get("dit_model") else {}),
+                    **({"lm_model": record.result.get("lm_model")} if i == 0 and record.result.get("lm_model") else {}),
+                    **({"lrc": record.result.get("lrc")} if i == 0 and record.result.get("lrc") else {}),
+                    **({"scores": record.result.get("scores")} if i == 0 and record.result.get("scores") is not None else {}),
                 }
                 for i, path in enumerate(audio_paths)
             ] if audio_paths else [{
