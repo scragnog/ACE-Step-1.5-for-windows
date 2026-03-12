@@ -1,3 +1,9 @@
+> **⚠️ THIS REPOSITORY IS NO LONGER MAINTAINED**
+>
+> **This project has been superseded by a new repository with a cleaner codebase, new features, and a fresh direction. A link to the replacement will be posted here soon. Please watch this repo or check back for the announcement.**
+
+---
+
 # ACE-Step 1.5 for Windows — Enhanced Fork
 
 An enhanced fork of [sdbds/ACE-Step-1.5-for-windows](https://github.com/sdbds/ACE-Step-1.5-for-windows) with a rebuilt UI experience, multi-adapter support, and quality-of-life improvements for music generation with [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5).
