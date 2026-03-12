@@ -739,20 +739,170 @@ def generate_music(
             unmastered_tensor = audio_tensor.clone()
             if params.auto_master:
                 try:
+                    # 1. Initialize StemService and Pedalboard dynamically
+                    if not hasattr(generate_music, '_stem_service'):
+                        from acestep.stem_service import StemService
+                        generate_music._stem_service = StemService()
+                        logger.info("[AutoMaster] StemService loaded")
                     if not hasattr(generate_music, '_mastering_engine'):
                         from acestep.core.audio.mastering import MasteringEngine
-                        generate_music._mastering_engine = MasteringEngine()
-                        logger.info("[AutoMaster] Mastering engine loaded")
+                        generate_music._mastering_engine = MasteringEngine(preset_name=params.mastering_preset if hasattr(params, 'mastering_preset') else None)
+                        logger.info(f"[AutoMaster] Mastering engine loaded")
 
-                    engine = generate_music._mastering_engine
-                    # Convert torch [channels, samples] → numpy [channels, samples]
-                    audio_np = audio_tensor.cpu().numpy().astype("float32")
-                    audio_np = engine.master(audio_np, sample_rate,
-                                            params_override=params.mastering_params)
-                    audio_tensor = torch.from_numpy(audio_np)
-                    logger.info(f"[AutoMaster] Audio {idx} mastered (peak={torch.max(torch.abs(audio_tensor)).item():.4f})")
+                    stem_service = generate_music._stem_service
+                    
+                    import numpy as np
+                    import soundfile as sf
+                    import pyloudnorm as pyln
+                    from pedalboard import Pedalboard, Compressor, HighShelfFilter, PeakFilter
+                    
+                    # Target LUFS settings
+                    STEM_MIX_LUFS = -12.0
+                    FINAL_MASTER_LUFS = -9.0
+                    
+                    def measure_lufs(audio_arr, sr):
+                        meter = pyln.Meter(sr)
+                        return meter.integrated_loudness(audio_arr)
+                        
+                    def process_vocals(audio_arr, sr):
+                        board = Pedalboard([
+                            Compressor(threshold_db=-18.0, ratio=2.5, attack_ms=5.0, release_ms=100.0),
+                            HighShelfFilter(cutoff_frequency_hz=8000.0, gain_db=2.0)
+                        ])
+                        return board(audio_arr, sr)
+
+                    def process_drums(audio_arr, sr):
+                        board = Pedalboard([
+                            # Catch peaks but let transients through (slower attack)
+                            Compressor(threshold_db=-16.0, ratio=3.0, attack_ms=40.0, release_ms=80.0),
+                            PeakFilter(cutoff_frequency_hz=70.0, gain_db=3.0, q=1.0)
+                        ])
+                        return board(audio_arr, sr)
+
+                    def process_bass(audio_arr, sr):
+                        board = Pedalboard([
+                            Compressor(threshold_db=-20.0, ratio=4.0, attack_ms=10.0, release_ms=150.0),
+                            # Boost fundamental weight
+                            PeakFilter(cutoff_frequency_hz=80.0, gain_db=3.0, q=0.7)
+                        ])
+                        return board(audio_arr, sr)
+                        
+                    def process_guitar(audio_arr, sr):
+                        board = Pedalboard([
+                            Compressor(threshold_db=-18.0, ratio=2.5, attack_ms=15.0, release_ms=100.0),
+                            HighShelfFilter(cutoff_frequency_hz=5000.0, gain_db=1.5)
+                        ])
+                        return board(audio_arr, sr)
+
+                    def process_other(audio_arr, sr):
+                        # Gentle glue
+                        board = Pedalboard([
+                            Compressor(threshold_db=-20.0, ratio=2.0, attack_ms=20.0, release_ms=200.0)
+                        ])
+                        return board(audio_arr, sr)
+
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        # 2. Save raw audio to temp file
+                        temp_wav = os.path.join(temp_dir, "temp_raw.wav")
+                        temp_tensor = audio_tensor.clone()
+                        if temp_tensor.dim() == 1:
+                            temp_tensor = temp_tensor.unsqueeze(0)
+                        elif temp_tensor.dim() > 2:
+                            temp_tensor = temp_tensor.squeeze()
+                            if temp_tensor.dim() == 1:
+                                temp_tensor = temp_tensor.unsqueeze(0)
+                        
+                        # Write to disk
+                        sf.write(temp_wav, temp_tensor.cpu().numpy().T, sample_rate)
+                        
+                        # 3. Separate Stems
+                        logger.info("[AutoMaster] Running 6-stem separation...")
+                        stems_list = stem_service.separate(temp_wav, mode="every-stem")
+                        
+                        # 4. Load STEMS and Apply LUFS Balancing
+                        # Base relative gains from original script
+                        relative_gains = {
+                            "vocals": 0.0,
+                            "drums": 0.0,
+                            "bass": 1.5,
+                            "guitar": 1.5,
+                            "piano": 0.0,
+                            "other": 1.5
+                        }
+                        
+                        processed_stems = []
+                        for stem in stems_list:
+                            stem_name = stem.stem_type
+                            stem_path = stem.file_path
+                            
+                            audio_data, sr = sf.read(stem_path)
+                            
+                            # Resample if RoFormer exported at a different SR (e.g., 44100) than generation (e.g., 48000)
+                            if sr != sample_rate:
+                                import librosa
+                                # sf returns [samples, channels], librosa needs [channels, samples]
+                                audio_data = librosa.resample(audio_data.T, orig_sr=sr, target_sr=sample_rate).T
+                                sr = sample_rate
+                                
+                            if len(audio_data.shape) == 1:
+                                audio_data = np.column_stack((audio_data, audio_data))
+                            
+                            # Preserve original RoFormer relationships, applying only relative static gain
+                            relative_boost = relative_gains.get(stem_name, 0.0)
+                            if relative_boost != 0.0:
+                                audio_data = audio_data * (10.0 ** (relative_boost / 20.0))
+                            
+                            # 5. Apply DSP
+                            # Pedalboard expects [channels, samples]
+                            audio_data = audio_data.T 
+                            
+                            if stem_name == "vocals":
+                                audio_data = process_vocals(audio_data, sr)
+                            elif stem_name == "drums":
+                                audio_data = process_drums(audio_data, sr)
+                            elif stem_name == "bass":
+                                audio_data = process_bass(audio_data, sr)
+                            elif stem_name == "guitar":
+                                audio_data = process_guitar(audio_data, sr)
+                            else:
+                                audio_data = process_other(audio_data, sr)
+                                
+                            processed_stems.append(audio_data.T) # Back to [samples, channels]
+                        
+                        # 6. Recombine Stems
+                        stereo_mix = np.sum(processed_stems, axis=0)
+                        
+                        # 7. Apply Mastering Engine
+                        engine = generate_music._mastering_engine
+                        # ensure engine preset is up to date with request if changed
+                        requested_preset = params.mastering_params.get("preset_name") if params.mastering_params else None
+                        if requested_preset and engine._preset_id != requested_preset:
+                            from acestep.core.audio.mastering import MasteringEngine
+                            generate_music._mastering_engine = MasteringEngine(preset_name=requested_preset)
+                            engine = generate_music._mastering_engine
+                            
+                        # Headroom reduction before mastering
+                        stereo_mix = stereo_mix * (10.0 ** (-6.0 / 20.0))
+                        
+                        mastered = engine.master(stereo_mix.T, sample_rate, params_override=params.mastering_params)
+                        
+                        # 8. LUFS Normalization & Final Limiting
+                        pre_norm_lufs = measure_lufs(mastered.T, sample_rate)
+                        if not np.isinf(pre_norm_lufs):
+                            gain_diff = FINAL_MASTER_LUFS - pre_norm_lufs
+                            linear_gain = 10.0 ** (gain_diff / 20.0)
+                            mastered = mastered * linear_gain
+                            
+                        # Hard clip true peak to -1.0 dBFS
+                        ceiling_linear = 10 ** (-1.0 / 20)
+                        mastered = np.clip(mastered, -ceiling_linear, ceiling_linear)
+                        
+                        # 9. Return to Torch
+                        audio_tensor = torch.from_numpy(mastered)
+                        logger.info(f"[AutoMaster] Audio {idx} stem-mastered (target -9.0 LUFS, peak={torch.max(torch.abs(audio_tensor)).item():.4f})")
+
                 except Exception as e:
-                    logger.warning(f"[AutoMaster] Mastering failed for audio {idx}, using unmastered: {e}")
+                    logger.warning(f"[AutoMaster] Stem Mastering failed for audio {idx}, using unmastered: {e}")
             # -----------------------------------------------
 
 

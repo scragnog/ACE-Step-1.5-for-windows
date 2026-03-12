@@ -1,22 +1,14 @@
 {
   "name": "Preset 1",
-  "description": "Warm, balanced master with gentle HF boost. Learned from professional reference chain.",
-  "source_original": "suite.wav",
-  "source_processed": "reference_mastered.wav",
+  "description": "Warm, balanced mastering. Exact match to original test script.",
   "sample_rate": 48000,
   "overall_gain_db": 6.5,
   "eq_bands": [
     {
-      "type": "low_shelf",
-      "freq_hz": 80.0,
-      "gain_db": -2.77,
-      "q": 0.7
-    },
-    {
       "type": "peak",
-      "freq_hz": 113.5,
-      "gain_db": -2.27,
-      "q": 0.1
+      "freq_hz": 904.3,
+      "gain_db": 0.23,
+      "q": 4.5
     },
     {
       "type": "peak",
@@ -43,12 +35,6 @@
       "q": 3.1
     },
     {
-      "type": "peak",
-      "freq_hz": 19925.3,
-      "gain_db": 8.01,
-      "q": 1.2
-    },
-    {
       "type": "high_shelf",
       "freq_hz": 10000.0,
       "gain_db": 3.24,
@@ -68,8 +54,8 @@
     "processed_side_ratio": 0.1246
   },
   "exciter": {
-    "harmonic_increase": 0.726,
-    "estimated_drive": 2.45
+    "harmonic_increase": 0.2,
+    "estimated_drive": 1.0
   },
   "limiter_ceiling_db": -1.0
 }
