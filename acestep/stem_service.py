@@ -114,8 +114,7 @@ class StemService:
     """
 
     ROFORMER_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
-    DEMUCS_6S_MODEL = "htdemucs_6s.yaml"
-    DEMUCS_FT_MODEL = "htdemucs_ft.yaml"
+    ROFORMER_SW_MODEL = "BS-Roformer-SW.ckpt"
 
     def __init__(self, output_root: Optional[str] = None, device: str = "auto"):
         self._separator = None
@@ -158,17 +157,15 @@ class StemService:
     def separate(
         self,
         audio_path: str,
-        mode: str = "two-pass",
+        mode: str = "every-stem",
         progress_callback: Optional[Callable[[str, float], None]] = None,
     ) -> List[StemInfo]:
         """Separate *audio_path* into stems.
 
         Modes
         -----
-        - ``vocals``   : BS-RoFormer → 2 stems (vocals + instrumental)
-        - ``multi-4``  : htdemucs_ft → 4 stems (vocals, drums, bass, other)
-        - ``multi-6``  : htdemucs_6s → 6 stems (vocals, drums, bass, guitar, piano, other)
-        - ``two-pass`` : BS-RoFormer vocals, then htdemucs_6s on instrumental → 6+ stems
+        - ``vocals``     : BS-RoFormer → 2 stems (vocals + instrumental)
+        - ``every-stem`` : BS-Roformer-SW → 6 stems (vocals, drums, bass, guitar, piano, other)
         """
         job_id = str(uuid4())
         output_dir = Path(self._output_root) / job_id
@@ -178,9 +175,7 @@ class StemService:
 
         dispatch = {
             "vocals": self._separate_vocals,
-            "multi-4": self._separate_multi_4,
-            "multi-6": self._separate_multi_6,
-            "two-pass": self._separate_two_pass,
+            "every-stem": self._separate_every_stem,
         }
         handler = dispatch.get(mode)
         if handler is None:
@@ -241,49 +236,18 @@ class StemService:
             cb("Vocal separation complete", 1.0)
         return stems
 
-    # ---- multi-4 (Demucs htdemucs_ft) ----
+    # ---- every-stem (BS-Roformer-SW 6-stem) ----
 
-    def _separate_multi_4(self, sep, audio_path, output_dir, cb) -> List[StemInfo]:
+    def _separate_every_stem(self, sep, audio_path, output_dir, cb) -> List[StemInfo]:
         if cb:
-            cb("Loading Demucs htdemucs_ft model…", 0.1)
+            cb("Loading BS-Roformer-SW model…", 0.1)
 
         sep.output_dir = str(output_dir)
         sep.output_format = "flac"
-        sep.load_model(model_filename=self.DEMUCS_FT_MODEL)
+        sep.load_model(model_filename=self.ROFORMER_SW_MODEL)
 
         if cb:
-            cb("Separating stems (4-stem)…", 0.3)
-
-        files = sep.separate(audio_path)
-
-        stems: List[StemInfo] = []
-        for fp in files:
-            fp = self._resolve(str(fp), output_dir)
-            stem_type = self._classify_stem_type(
-                fp.stem.lower(), ("vocals", "drums", "bass", "other")
-            )
-            stems.append(StemInfo(
-                stem_type=stem_type,
-                file_path=str(fp),
-                file_name=fp.name,
-                duration=_get_audio_duration(str(fp)),
-            ))
-        if cb:
-            cb("4-stem separation complete", 1.0)
-        return stems
-
-    # ---- multi-6 (Demucs htdemucs_6s) ----
-
-    def _separate_multi_6(self, sep, audio_path, output_dir, cb) -> List[StemInfo]:
-        if cb:
-            cb("Loading Demucs htdemucs_6s model…", 0.1)
-
-        sep.output_dir = str(output_dir)
-        sep.output_format = "flac"
-        sep.load_model(model_filename=self.DEMUCS_6S_MODEL)
-
-        if cb:
-            cb("Separating stems (6-stem)…", 0.3)
+            cb("Separating all 6 stems…", 0.3)
 
         files = sep.separate(audio_path)
 
@@ -304,82 +268,3 @@ class StemService:
             cb("6-stem separation complete", 1.0)
         return stems
 
-    # ---- two-pass (RoFormer → htdemucs_6s) ----
-
-    def _separate_two_pass(self, sep, audio_path, output_dir, cb) -> List[StemInfo]:
-        # --- Pass 1: BS-RoFormer → vocals + instrumental ----
-        if cb:
-            cb("Pass 1/2: Isolating vocals with BS-RoFormer…", 0.05)
-
-        sep.output_dir = str(output_dir)
-        sep.output_format = "flac"
-        sep.load_model(model_filename=self.ROFORMER_MODEL)
-
-        if cb:
-            cb("Pass 1/2: Separating…", 0.15)
-
-        pass1_files = sep.separate(audio_path)
-
-        vocals_path: Optional[str] = None
-        instrumental_path: Optional[str] = None
-
-        for fp in pass1_files:
-            fp = str(self._resolve(str(fp), output_dir))
-            fname = Path(fp).stem.lower()
-            if "vocal" in fname and "instrument" not in fname:
-                vocals_path = fp
-            else:
-                instrumental_path = fp
-
-        if not instrumental_path:
-            logger.warning("[StemService] Could not identify instrumental "
-                           "from pass-1; falling back to vocals-only result")
-            if cb:
-                cb("Fallback: returning 2-stem result", 1.0)
-            return self._separate_vocals(sep, audio_path, output_dir, cb)
-
-        # --- Pass 2: htdemucs_6s on instrumental → 5 stems ----
-        if cb:
-            cb("Pass 2/2: Splitting instrumental with htdemucs_6s…", 0.45)
-
-        pass2_dir = output_dir / "pass2"
-        pass2_dir.mkdir(exist_ok=True)
-        sep.output_dir = str(pass2_dir)
-        sep.load_model(model_filename=self.DEMUCS_6S_MODEL)
-
-        if cb:
-            cb("Pass 2/2: Separating…", 0.55)
-
-        pass2_files = sep.separate(instrumental_path)
-
-        # --- Combine results ----
-        stems: List[StemInfo] = []
-
-        # Vocals from pass 1 (highest quality — RoFormer)
-        if vocals_path:
-            stems.append(StemInfo(
-                stem_type="vocals",
-                file_path=vocals_path,
-                file_name=Path(vocals_path).name,
-                duration=_get_audio_duration(vocals_path),
-            ))
-
-        # Instrumental stems from pass 2 (skip duplicate vocals from Demucs)
-        for fp in pass2_files:
-            fp = self._resolve(str(fp), pass2_dir)
-            fname = fp.stem.lower()
-            if "vocal" in fname:
-                continue  # skip — we already have RoFormer vocals
-            stem_type = self._classify_stem_type(
-                fname, ("drums", "bass", "guitar", "piano", "other")
-            )
-            stems.append(StemInfo(
-                stem_type=stem_type,
-                file_path=str(fp),
-                file_name=fp.name,
-                duration=_get_audio_duration(str(fp)),
-            ))
-
-        if cb:
-            cb("Two-pass separation complete", 1.0)
-        return stems

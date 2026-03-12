@@ -196,3 +196,42 @@ def register_stems_routes(
                 raise HTTPException(404, f"Stem file missing from disk: {fp}")
 
         raise HTTPException(404, f"Stem '{stem_name}' not found in job")
+
+    @app.get("/v1/stems/{job_id}/download_all")
+    async def stems_download_all(job_id: str):
+        """Download all stems for a completed job as a ZIP file."""
+        import zipfile
+        from starlette.background import BackgroundTask
+
+        with _stem_lock:
+            job = _stem_jobs.get(job_id)
+            
+        if job is None:
+            raise HTTPException(404, "Job not found")
+        if job["status"] != "complete":
+            raise HTTPException(400, f"Job not complete (status: {job['status']})")
+
+        stems = job["stems"]
+        if not stems:
+            raise HTTPException(400, "No stems generated for this job")
+
+        # Use the directory of the first stem to store the temporary zip
+        output_dir = os.path.dirname(stems[0]["file_path"])
+        zip_path = os.path.join(output_dir, f"{job_id}_stems.zip")
+
+        # Create zip file dynamically
+        if not os.path.exists(zip_path):
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for stem in stems:
+                    fp = stem["file_path"]
+                    if os.path.isfile(fp):
+                        zipf.write(fp, arcname=stem["file_name"])
+
+        # Return the zipped file and schedule cleanup to preserve disk space
+        return FileResponse(
+            zip_path,
+            media_type="application/zip",
+            filename="stems_bundle.zip",
+            background=BackgroundTask(lambda: os.remove(zip_path) if os.path.exists(zip_path) else None)
+        )
+

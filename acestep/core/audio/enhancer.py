@@ -492,7 +492,7 @@ class AudioEnhancer:
         self._stem_cache: Dict[str, Dict[str, Any]] = {}
         self._stem_cache_max = 3  # Keep at most N cached separations
 
-    def _load_demucs(self, model_name: str = "htdemucs", device: str = "cuda"):
+    def _load_demucs(self, model_name: str = "BS-Roformer-SW.ckpt", device: str = "cuda"):
         """Load Demucs model on demand.
 
         Supports two backends:
@@ -508,8 +508,7 @@ class AudioEnhancer:
                     from audio_separator.separator import Separator
                     with _float32_default_dtype():
                         self._demucs_model = Separator()
-                        model_filename = f"{model_name}.yaml"
-                        self._demucs_model.load_model(model_filename=model_filename)
+                        self._demucs_model.load_model(model_filename=model_name)
                     self._demucs_model_name = model_name
                 return self._demucs_model
             else:
@@ -651,7 +650,7 @@ class AudioEnhancer:
 
         enhancement_level = params.get("enhancement_level", 0.5)
         device = params.get("device", "cuda")
-        model_name = params.get("demucs_model", "htdemucs")
+        model_name = params.get("demucs_model", "BS-Roformer-SW.ckpt")
 
         # Stem cache: key by audio content hash so same file reuses stems
         cache_key = hashlib.md5(audio.tobytes()[:1_000_000]).hexdigest()  # hash first ~1MB for speed
@@ -783,9 +782,9 @@ class AudioEnhancer:
             # during load_model(), so we MUST set output_dir and re-call
             # load_model() before every separate() — same pattern as stem_service.py.
             separator.output_dir = tmp_dir
-            model_name = self._demucs_model_name or "htdemucs"
+            model_name = self._demucs_model_name or "BS-Roformer-SW.ckpt"
             with _float32_default_dtype():
-                separator.load_model(model_filename=f"{model_name}.yaml")
+                separator.load_model(model_filename=model_name)
                 stem_files = separator.separate(src_path)
             logger.info(f"audio_separator produced {len(stem_files)} stem files: {stem_files}")
 
