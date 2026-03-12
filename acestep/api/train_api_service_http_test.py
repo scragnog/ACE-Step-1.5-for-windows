@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 import unittest
 from unittest import mock
@@ -119,6 +120,36 @@ class TrainingApiServiceHttpTests(unittest.TestCase):
 
         self.assertEqual(400, response.status_code)
         self.assertIn("Directory not found", response.json()["detail"])
+
+    @mock.patch("acestep.api.train_api_service.register_training_dataset_routes")
+    @mock.patch("acestep.api.train_api_service.runtime_temporary_llm_model")
+    def test_dataset_routes_receive_bound_temporary_llm_helper(
+        self,
+        mock_runtime_temporary_llm_model: mock.MagicMock,
+        mock_register_training_dataset_routes: mock.MagicMock,
+    ) -> None:
+        """register_training_api_routes should pass a pre-bound temporary-LLM helper into dataset routes."""
+
+        app = FastAPI()
+
+        register_training_api_routes(
+            app=app,
+            verify_api_key=_verify_api_key,
+            wrap_response=_wrap_response,
+            start_tensorboard=lambda _app, _logdir: None,
+            stop_tensorboard=lambda _app: None,
+            atomic_write_json=lambda _path, _payload: None,
+            append_jsonl=lambda _path, _record: None,
+        )
+
+        helper = mock_register_training_dataset_routes.call_args.kwargs["temporary_llm_model"]
+        result = helper(app, SimpleNamespace(), "alt-model")
+
+        self.assertIs(mock_runtime_temporary_llm_model.return_value, result)
+        self.assertEqual(app, mock_runtime_temporary_llm_model.call_args.kwargs["app"])
+        self.assertEqual("alt-model", mock_runtime_temporary_llm_model.call_args.kwargs["lm_model_path"])
+        self.assertIn("get_project_root", mock_runtime_temporary_llm_model.call_args.kwargs)
+        self.assertIn("ensure_model_downloaded", mock_runtime_temporary_llm_model.call_args.kwargs)
 
 
 if __name__ == "__main__":

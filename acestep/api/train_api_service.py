@@ -10,10 +10,14 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import Depends, FastAPI, HTTPException
 from loguru import logger
 
+from acestep.api.model_download import ensure_model_downloaded
+from acestep.api.runtime_helpers import temporary_llm_model as runtime_temporary_llm_model
+from acestep.api.server_utils import env_bool, get_model_name
 from acestep.api.train_api_dataset_service import register_training_dataset_routes
 from acestep.api.train_api_lokr_start_route import register_lokr_training_start_route
 from acestep.api.train_api_lora_start_route import register_lora_training_start_route
 from acestep.api.train_api_models import ExportLoRARequest, initialize_training_state
+from acestep.model_downloader import get_project_root
 
 
 def register_training_api_routes(
@@ -26,6 +30,19 @@ def register_training_api_routes(
     append_jsonl: Callable[[str, Dict[str, Any]], None],
 ) -> None:
     """Register all training-related endpoints onto ``app``."""
+
+    def _temporary_llm_model(app_obj: FastAPI, llm: Any, lm_model_path: Optional[str]) -> Any:
+        """Bind runtime helper dependencies for dataset routes."""
+
+        return runtime_temporary_llm_model(
+            app=app_obj,
+            llm=llm,
+            lm_model_path=lm_model_path,
+            get_project_root=lambda: str(get_project_root()),
+            get_model_name=get_model_name,
+            ensure_model_downloaded=ensure_model_downloaded,
+            env_bool=env_bool,
+        )
 
     register_lora_training_start_route(
         app=app,
@@ -43,6 +60,7 @@ def register_training_api_routes(
         app=app,
         verify_api_key=verify_api_key,
         wrap_response=wrap_response,
+        temporary_llm_model=_temporary_llm_model,
         atomic_write_json=atomic_write_json,
         append_jsonl=append_jsonl,
     )
