@@ -6,6 +6,33 @@ This document tracks all new features added on top of the upstream [sdbds/ACE-St
 
 ---
 
+## Upstream Sync (v1.5.0-sync)
+
+**Branch:** `qinglong`
+**Status:** ✅ Merged
+
+Synced 37 upstream commits from [sdbds/ACE-Step-1.5-for-windows](https://github.com/sdbds/ACE-Step-1.5-for-windows). Safely integrated core improvements while preserving all custom features (Guidance Mode, Auto-Mastering, Advanced Adapters).
+
+### What's included
+
+| File | Description |
+|------|-------------|
+| `acestep/api/http/release_task_request_builder.py` | Ported upstream fix for multi-seed `batch_size` parsing |
+| `docs/*`, `.github/*` | Brought in VitePress documentation structure and issue templates |
+| `Dockerfile.jetson`, `docker-compose.yaml` | Jetson Nano and Docker containerization support |
+| `acestep/ui/gradio/i18n/*` | Chinese translation fixes for Gradio interfaces |
+| `.claude/skills/*` | System prompt and skill script updates |
+| `acestep/core/generation/handler/memory_utils.py` | Core ROCm `float32` default dtype fixes |
+
+### How it works
+
+1. 14 safe commits were cherry-picked directly from upstream.
+2. The `release_task_request_builder.py` fix was manually ported to prevent overwriting the custom `guidance_mode` pass-through logic.
+3. Upstream AceFlow UI commits that were added and reverted were skipped.
+4. The remaining history was aligned with a Git merge.
+
+---
+
 ## Melodic Variation
 
 **Branch:** `qinglong`
