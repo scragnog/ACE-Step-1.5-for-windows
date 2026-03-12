@@ -54,7 +54,7 @@ def build_generate_music_request(
         inference_steps=parser.int("inference_steps", 8),
         guidance_scale=parser.float("guidance_scale", 7.0),
         use_random_seed=parser.bool("use_random_seed", True),
-        seed=parser.int("seed", -1),
+        seed=parser.get("seed", -1),
         batch_size=parser.int("batch_size"),
         repainting_start=parser.float("repainting_start", 0.0),
         repainting_end=parser.float("repainting_end"),
