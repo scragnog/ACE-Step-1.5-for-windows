@@ -1,6 +1,6 @@
 > **⚠️ THIS REPOSITORY IS NO LONGER MAINTAINED**
 >
-> **This project has been superseded by a new repository with a cleaner codebase, new features, and a fresh direction. A link to the replacement will be posted here soon. Please watch this repo or check back for the announcement.**
+> **This project has been superseded by a [new repository with a cleaner codebase, new features, and a fresh direction. CLICK HERE!](https://github.com/scragnog/HOT-Step-9000)**
 
 ---
 
